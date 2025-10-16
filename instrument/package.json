@@ -1,0 +1,26 @@
+{
+  "name": "@workspace/instrument",
+  "version": "0.1.0",
+  "description": "Decorator-like logging utilities to instrument function calls (params and return values).",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf dist *.tsbuildinfo || rmdir /S /Q dist 2>nul",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "instrument",
+    "decorator",
+    "logging"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "rimraf": "^5.0.5"
+  }
+}

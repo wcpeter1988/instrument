@@ -1,0 +1,188 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Datalake</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; }
+    header { background: #0f172a; color: white; padding: 12px 16px; }
+    main { padding: 16px; }
+    .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .tree ul { list-style: none; padding-left: 16px; }
+    .tree li { margin: 2px 0; }
+    code { background: #f8fafc; padding: 2px 4px; border-radius: 4px; }
+    .muted { color: #64748b; }
+  </style>
+</head>
+<body>
+  <header>
+    <h2>Datalake</h2>
+  </header>
+  <main>
+    <section class="controls">
+      <label>Project: <input id="project" placeholder="my-project" /></label>
+      <label>Session (optional): <input id="session" placeholder="s1" /></label>
+      <label>TagId (optional): <input id="tagid" placeholder="sensor" /></label>
+      <select id="view">
+        <option value="nested">Nested</option>
+        <option value="flat">Flat</option>
+      </select>
+      <button id="load">Load</button>
+    </section>
+    <section class="controls" style="border-top:1px solid #e2e8f0; padding-top:12px; margin-top:12px;">
+      <strong>Danger zone:</strong>
+      <button id="clear-project" style="color:#b91c1c;">Clear current project</button>
+      <button id="clear-all" style="color:#7f1d1d;">Clear ALL data</button>
+      <span id="clear-status" class="muted"></span>
+    </section>
+    <section id="output"></section>
+  </main>
+  <script>
+    const out = document.getElementById('output');
+  const statusEl = document.getElementById('clear-status');
+    document.getElementById('load').addEventListener('click', async () => {
+      const project = document.getElementById('project').value.trim();
+      const session = document.getElementById('session').value.trim();
+      const tagid = document.getElementById('tagid').value.trim();
+      const view = document.getElementById('view').value;
+      if (!project) { alert('Enter project'); return; }
+      out.textContent = 'Loading...';
+      const params = new URLSearchParams({ project, nest: view === 'flat' ? 'flat' : 'session,tagid,description' });
+      if (session) params.set('session', session);
+      if (tagid) params.set('tagid', tagid);
+      const res = await fetch(`/api/data?${params.toString()}`);
+      if (!res.ok) { out.textContent = 'Error: ' + res.statusText; return; }
+      const data = await res.json();
+      if (view === 'flat') renderFlat(data); else renderNested(normalizeResponse(data));
+    });
+
+    document.getElementById('clear-project').addEventListener('click', async () => {
+      const project = document.getElementById('project').value.trim();
+      if (!project) { alert('Enter project'); return; }
+      if (!confirm(`Are you sure you want to clear project '${project}'? This cannot be undone.`)) return;
+      statusEl.textContent = 'Clearing project...';
+      const res = await fetch(`/api/data?project=${encodeURIComponent(project)}`, { method: 'DELETE' });
+      if (!res.ok) { statusEl.textContent = 'Failed to clear project'; return; }
+      const data = await res.json();
+      statusEl.textContent = `Cleared project '${project}'. Removed ${data.removed ?? 0} entries.`;
+      out.innerHTML = '';
+    });
+
+    document.getElementById('clear-all').addEventListener('click', async () => {
+      if (!confirm('Are you absolutely sure you want to CLEAR ALL DATA? This action is irreversible.')) return;
+      statusEl.textContent = 'Clearing all data...';
+      const res = await fetch('/api/data', { method: 'DELETE' });
+      if (!res.ok) { statusEl.textContent = 'Failed to clear all data'; return; }
+      const data = await res.json();
+      statusEl.textContent = `Cleared all data. Removed ${data.removed ?? 0} entries.`;
+      out.innerHTML = '';
+    });
+
+    function renderFlat({ project, items }) {
+      out.innerHTML = `<h3>Project: ${project}</h3><p>${items.length} item(s)</p>`;
+      const ul = document.createElement('ul');
+      for (const it of items) {
+        const li = document.createElement('li');
+        li.innerHTML = `<code>${new Date(it.timestamp).toISOString()}</code> <span class="muted">[${it.tagid}/${it.description}/${it.session}]</span> <pre>${escapeHtml(JSON.stringify(it.payload, null, 2))}</pre>`;
+        ul.appendChild(li);
+      }
+      out.appendChild(ul);
+    }
+
+    function normalizeResponse(resp) {
+      const project = resp.project;
+      const data = resp.data || {};
+      const norm = {};
+      let hadNew = false;
+      // Try new layout: session -> tagid -> description
+      for (const sess in data) {
+        const maybeTags = data[sess];
+        if (maybeTags && typeof maybeTags === 'object' && !Array.isArray(maybeTags)) {
+          for (const tag in maybeTags) {
+            const maybeDescs = maybeTags[tag];
+            if (maybeDescs && typeof maybeDescs === 'object' && !Array.isArray(maybeDescs)) {
+              for (const desc in maybeDescs) {
+                const items = maybeDescs[desc];
+                if (Array.isArray(items)) {
+                  if (!norm[sess]) norm[sess] = {};
+                  if (!norm[sess][tag]) norm[sess][tag] = {};
+                  if (!norm[sess][tag][desc]) norm[sess][tag][desc] = [];
+                  norm[sess][tag][desc].push(...items);
+                  hadNew = true;
+                }
+              }
+            }
+          }
+        }
+      }
+      // If nothing parsed as new layout, try old layout: tagid -> description -> session
+      if (!hadNew) {
+        for (const tag in data) {
+          const maybeDescs = data[tag];
+          if (maybeDescs && typeof maybeDescs === 'object' && !Array.isArray(maybeDescs)) {
+            for (const desc in maybeDescs) {
+              const maybeSess = maybeDescs[desc];
+              if (maybeSess && typeof maybeSess === 'object' && !Array.isArray(maybeSess)) {
+                for (const sess in maybeSess) {
+                  const items = maybeSess[sess];
+                  if (Array.isArray(items)) {
+                    if (!norm[sess]) norm[sess] = {};
+                    if (!norm[sess][tag]) norm[sess][tag] = {};
+                    if (!norm[sess][tag][desc]) norm[sess][tag][desc] = [];
+                    norm[sess][tag][desc].push(...items);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      return { project, data: norm };
+    }
+
+    function renderNested({ project, data }) {
+      out.innerHTML = `<h3>Project: ${project}</h3>`;
+      const tree = document.createElement('div');
+      tree.className = 'tree';
+      const ul = document.createElement('ul');
+      for (const sess in data) {
+        const liSess = document.createElement('li');
+        liSess.innerHTML = `<strong>session:</strong> <code>${sess}</code>`;
+        const ulPairs = document.createElement('ul');
+        // Collapse by tagid: merge all descriptions under the same tagid and pick the first description as label
+        const byTag = {};
+        for (const tag in data[sess]) {
+          for (const desc in data[sess][tag]) {
+            const items = data[sess][tag][desc] || [];
+            if (!byTag[tag]) byTag[tag] = { description: desc, items: [] };
+            // If a different description appears for the same tagid, keep the first seen as canonical label
+            byTag[tag].items.push(...items);
+          }
+        }
+        for (const tag in byTag) {
+          const { description, items } = byTag[tag];
+          const liPair = document.createElement('li');
+          liPair.innerHTML = `<strong>tagid/description:</strong> <code>${tag}/${description}</code> <span class="muted">(${items.length})</span>`;
+          const ulItems = document.createElement('ul');
+          for (const it of items) {
+            const liIt = document.createElement('li');
+            liIt.innerHTML = `<code>${new Date(it.timestamp).toISOString()}</code> <pre>${escapeHtml(JSON.stringify(it.payload, null, 2))}</pre>`;
+            ulItems.appendChild(liIt);
+          }
+          liPair.appendChild(ulItems);
+          ulPairs.appendChild(liPair);
+        }
+        liSess.appendChild(ulPairs);
+        ul.appendChild(liSess);
+      }
+      tree.appendChild(ul);
+      out.appendChild(tree);
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+    }
+  </script>
+</body>
+</html>

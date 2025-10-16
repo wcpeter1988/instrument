@@ -1,0 +1,31 @@
+{
+  "name": "testbed",
+  "private": true,
+  "version": "0.1.0",
+  "type": "commonjs",
+  "dependencies": {
+    "@workspace/instrument": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "ts-node": "^10.9.2",
+    "rimraf": "^5.0.5",
+    "@types/node": "^20.14.12",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "@types/jest": "^29.5.12"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf dist *.tsbuildinfo || rmdir /S /Q dist 2>nul",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "pretest": "npm --workspace ../instrument run build",
+    "test": "jest --config jest.config.cjs",
+    "test:watch": "jest --watch",
+    "test:success": "jest --config jest.config.cjs --testPathPattern success\\.test\\.ts$",
+    "test:fail": "jest --config jest.config.cjs --testPathPattern fail\\.test\\.ts$"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts"
+}

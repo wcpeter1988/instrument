@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true,
+    "types": ["node"],
+    "isolatedModules": true
+  },
+  "references": [
+    { "path": "../instrument" }
+  ],
+  "include": ["src"]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "instrument-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "instrument",
+    "testbed",
+    "datalake"
+  ],
+  "scripts": {
+    "build": "npm run -ws build",
+    "clean": "npm run -ws clean",
+    "start": "npm --workspace testbed run start",
+    "start:datalake": "npm --workspace datalake run start",
+    "dev:datalake": "npm --workspace datalake run dev",
+    "lint": "echo 'No linter configured'"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

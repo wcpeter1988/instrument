@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "common" },
     { "path": "instrument" },
     { "path": "testbed" },
     { "path": "datalake" }

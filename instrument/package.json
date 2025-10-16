@@ -23,4 +23,8 @@
     "typescript": "^5.5.4",
     "rimraf": "^5.0.5"
   }
+  ,
+  "dependencies": {
+    "@workspace/common": "0.0.1"
+  }
 }

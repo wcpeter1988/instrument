@@ -6,6 +6,7 @@ module.exports = {
   testMatch: ['**/*.test.ts'],
   moduleNameMapper: {
     '^@workspace/instrument$': '<rootDir>/../instrument/dist/index.js',
+    '^@workspace/common$': '<rootDir>/../common/src/index.ts'
   },
   // ts-jest config: move from deprecated `globals` to `transform` options
   transform: {

@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "commonjs",
   "dependencies": {
-    "@workspace/instrument": "*"
+    "@workspace/instrument": "*",
+    "@workspace/common": "*"
   },
   "devDependencies": {
     "typescript": "^5.5.4",
@@ -19,8 +20,9 @@
     "build": "tsc -b",
     "clean": "rimraf dist *.tsbuildinfo || rmdir /S /Q dist 2>nul",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
-    "pretest": "npm --workspace ../instrument run build",
+    "predev": "npm --workspace ../common run build && npm --workspace ../instrument run build",
+    "dev": "npm run predev && ts-node src/index.ts",
+  "pretest": "npm --workspace ../common run build && npm --workspace ../instrument run build",
     "test": "jest --config jest.config.cjs",
     "test:watch": "jest --watch",
     "test:success": "jest --config jest.config.cjs --testPathPattern success\\.test\\.ts$",

@@ -11,6 +11,10 @@
     "sourceMap": true,
     "outDir": "dist",
     "experimentalDecorators": true,
-    "emitDecoratorMetadata": false
+    "emitDecoratorMetadata": false,
+    "baseUrl": "./",
+    "paths": {
+      "@workspace/common": ["common/src"]
+    }
   }
 }

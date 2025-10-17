@@ -41,8 +41,7 @@ describe('evaluation framework e2e', () => {
   test('fetch datalake items and run metrics', async () => {
     // Load metrics config
     const metricsPath = path.join(__dirname, 'eval.metrics.json');
-    const metricsJson = fs.readFileSync(metricsPath, 'utf8');
-    const metrics = JSON.parse(metricsJson) as EvalTypes.MetricConfig[];
+  // Local metrics file path preserved for evaluateAllFromConfig usage.
 
     // Fetch flat data for project
     const data = await get(`${base}/api/data?project=${encodeURIComponent(project)}&nest=flat`);
@@ -55,19 +54,18 @@ describe('evaluation framework e2e', () => {
     // Take first few items to evaluate
     const sample = data.items.slice(0, 3).map(toLogUnit);
 
-    // Evaluate metrics on each item (new consolidated API)
+    // Evaluate metrics once across all units
     const evalPath = path.join(__dirname, 'eval.metrics.json');
-  const allResults = await Eval.evaluateAllFromConfig(evalPath, sample);
-    expect(Array.isArray(allResults)).toBe(true);
-    for (const { unit, results } of allResults) {
-      expect(Array.isArray(results)).toBe(true);
-      for (const r of results) {
-        expect(typeof r.metric).toBe('string');
-        expect(typeof r.success).toBe('boolean');
-      }
-      // Print for human inspection
-      // eslint-disable-next-line no-console
-      console.log('[eval-results]', JSON.stringify({ tagId: unit.tagId, ts: unit.timestamp, results }));
+    const rawResults: any = await Eval.evaluateAllFromConfig(evalPath, sample);
+    expect(Array.isArray(rawResults)).toBe(true);
+    // New shape: EvaluationResult[] (no per-unit grouping)
+    const results = rawResults as EvalTypes.EvaluationResult[];
+    for (const r of results) {
+      expect(r && typeof r.metric).toBe('string');
+      expect(typeof r.success).toBe('boolean');
     }
+    const passedCount = results.filter(r => r.success).length;
+    // eslint-disable-next-line no-console
+    console.log('[eval-results]', JSON.stringify({ project, units: sample.length, passed: passedCount, total: results.length }));
   }, 15000);
 });

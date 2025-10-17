@@ -1,24 +1,24 @@
-import { endInstrumentSession, startInstrumentSession, Eval, EvalTypes } from '@workspace/instrument';
+import { endInstrumentSession, startInstrumentSession, Eval, EvalTypes, EvalClient } from '@workspace/instrument';
+import { printEvaluationTable } from '@workspace/instrument/dist/eval/evaluator';
 import { runMockServiceDecorated } from './workflow';
 import { randomUUID } from 'crypto';
-import fs from 'fs';
-import path from 'path';
-import http from 'http';
 
 async function main() {
     try {
-        const sessionId = randomUUID();
         const project = 'instrumentMeetingInsight';
-        const session = `meeting_insight_${sessionId}`;
-        const units = startInstrumentSession(project, session, 'http://localhost:3300/api/data');
+        const datalake_url = 'http://localhost:3300';
+        const units = startInstrumentSession(project, `mock_session_${randomUUID()}`, datalake_url);
         await runMockServiceDecorated('How to separate success and fail pipelines?');
-
-        const metricsPath = path.join(__dirname, 'eval.metrics.json');
-        const evalResults = await Eval.evaluateAllFromConfig(metricsPath, units);
-        for (const { unit, results } of evalResults) {
-            console.log('[eval-results]', JSON.stringify({ tagId: unit.tagId, ts: unit.timestamp, results }));
-        }
         endInstrumentSession();
+
+        try {
+            const client = new EvalClient(datalake_url);
+            const remoteResults = await client.evaluate(`${project}:latest`, units);
+            printEvaluationTable(remoteResults);
+        } catch (err) {
+            console.warn('Remote evaluation skipped:', (err as any)?.message || err);
+        }
+
     }
     catch (e) {
         console.error('Error running workflow:', e);

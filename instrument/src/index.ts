@@ -50,4 +50,6 @@ export const InstrumentCall = logCall;
 export * as Eval from './eval/evaluator';
 export * as EvalTypes from './eval/types';
 export * as EvalQuery from './eval/query';
+export { autoGenerateMetrics, autoGenerate } from './eval/autogen';
+export { EvalClient } from './eval/evaluator';
 

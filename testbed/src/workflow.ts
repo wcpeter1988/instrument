@@ -1,4 +1,4 @@
-import { InstrumentVar, LogMethod } from '@workspace/instrument';
+import { InstrumentMethod, InstrumentVar } from '@workspace/instrument';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -36,7 +36,7 @@ export interface IWorkflowStore {
 
 // Decorator-based variant (kept for context service only)
 export class DecoratedContextService {
-    @LogMethod({ label: 'fetchContext', params: ['question'], return: true })
+    @InstrumentMethod({ label: 'fetchContext', params: ['question'], return: true })
     async fetchContext(question: string): Promise<string[]> {
         await sleep(20);
         return [
@@ -46,7 +46,7 @@ export class DecoratedContextService {
         ];
     }
 
-    @LogMethod({ label: 'getMeetingInsight', params: ['transcript'], return: true })
+    @InstrumentMethod({ label: 'getMeetingInsight', params: ['transcript'], return: true })
     public async getMeetingInsight(
         client: IOpenAiChatClient,
         transcript?: string,

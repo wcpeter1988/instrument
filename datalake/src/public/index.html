@@ -5,14 +5,35 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Datalake</title>
   <style>
+    :root { --border:#e2e8f0; --bg-alt:#f8fafc; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; }
     header { background: #0f172a; color: white; padding: 12px 16px; }
-    main { padding: 16px; }
-    .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    main { padding: 0; height: calc(100vh - 56px); display:flex; }
+    .pane { flex:1; display:flex; flex-direction:column; min-width:0; border-right:1px solid var(--border); }
+    .pane:last-child { border-right:none; }
+    .pane header.pane-header { background:#ffffff; padding:12px 16px; border-bottom:1px solid var(--border); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .pane header.pane-header h3 { margin:0; font-size:16px; }
+    .pane .content { padding:16px; overflow:auto; }
+    .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap:wrap; }
     .tree ul { list-style: none; padding-left: 16px; }
     .tree li { margin: 2px 0; }
-    code { background: #f8fafc; padding: 2px 4px; border-radius: 4px; }
+    code { background: var(--bg-alt); padding: 2px 4px; border-radius: 4px; }
     .muted { color: #64748b; }
+    textarea { width:100%; min-height:160px; font-family: monospace; font-size:12px; }
+    button { cursor:pointer; }
+    .split { display:flex; gap:8px; }
+    .status { font-size:12px; }
+    .error { color:#b91c1c; }
+    .success { color:#047857; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    label { font-size:12px; display:flex; flex-direction:column; gap:2px; }
+    input { padding:4px 6px; }
+    .sessions-select { margin-top:16px; border-top:1px solid var(--border); padding-top:12px; }
+    .sessions-select h4 { margin:0 0 8px 0; font-size:14px; }
+    .sessions-list { display:flex; flex-direction:column; gap:4px; }
+    .gen-bar { margin-top:12px; display:flex; align-items:center; gap:12px; }
+    .gen-bar button { padding:6px 10px; }
+    .pill { display:inline-block; background:var(--bg-alt); border:1px solid var(--border); border-radius:12px; padding:2px 8px; font-size:12px; }
   </style>
 </head>
 <body>
@@ -20,27 +41,93 @@
     <h2>Datalake</h2>
   </header>
   <main>
-    <section class="controls">
-      <label>Project: <input id="project" placeholder="my-project" /></label>
-      <label>Session (optional): <input id="session" placeholder="s1" /></label>
-      <label>TagId (optional): <input id="tagid" placeholder="sensor" /></label>
-      <select id="view">
-        <option value="nested">Nested</option>
-        <option value="flat">Flat</option>
-      </select>
-      <button id="load">Load</button>
-    </section>
-    <section class="controls" style="border-top:1px solid #e2e8f0; padding-top:12px; margin-top:12px;">
-      <strong>Danger zone:</strong>
-      <button id="clear-project" style="color:#b91c1c;">Clear current project</button>
-      <button id="clear-all" style="color:#7f1d1d;">Clear ALL data</button>
-      <span id="clear-status" class="muted"></span>
-    </section>
-    <section id="output"></section>
+    <!-- Data Pane -->
+    <div class="pane" id="data-pane">
+      <header class="pane-header">
+        <h3>Data</h3>
+        <label>Project
+          <input id="project" placeholder="my-project" />
+        </label>
+        <label>Session
+          <input id="session" placeholder="s1" />
+        </label>
+        <label>TagId
+          <input id="tagid" placeholder="sensor" />
+        </label>
+        <label>View
+          <select id="view">
+            <option value="nested">Nested</option>
+            <option value="flat">Flat</option>
+          </select>
+        </label>
+        <button id="load">Load</button>
+        <div class="row" style="margin-left:auto;">
+          <button id="clear-project" style="color:#b91c1c;">Clear project</button>
+          <button id="clear-all" style="color:#7f1d1d;">Clear ALL</button>
+        </div>
+      </header>
+      <div class="content">
+        <div id="clear-status" class="status muted" style="margin-bottom:8px;"></div>
+        <section id="output"></section>
+        <div id="sessions-section" class="sessions-select" style="display:none;">
+          <h4>Sessions</h4>
+          <div id="sessions-list" class="sessions-list"></div>
+          <div id="gen-bar" class="gen-bar" style="display:none;">
+            <button id="gen-btn">Generate Config</button>
+            <span id="gen-status" class="status muted"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Config Pane -->
+    <div class="pane" id="config-pane">
+      <header class="pane-header">
+        <h3>Config</h3>
+        <label style="min-width:160px;">Project (shared)
+          <input id="config-project" disabled />
+        </label>
+        <label>Version
+          <input id="config-version" type="number" min="1" placeholder="(latest)" style="width:90px;" />
+        </label>
+        <button id="config-load">Fetch</button>
+        <button id="config-new-version" title="Create new version from editor">Save New Version</button>
+        <span id="config-meta" class="muted" style="font-size:12px;"></span>
+      </header>
+      <div class="content">
+        <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <strong>Current Version JSON</strong>
+          <span id="config-status" class="status muted"></span>
+        </div>
+        <pre id="config-view" style="background:var(--bg-alt); padding:8px; border:1px solid var(--border); border-radius:4px; max-height:240px; overflow:auto;">(no config loaded)</pre>
+        <div style="margin-top:16px;">
+          <strong>New Version Editor</strong>
+          <textarea id="config-editor" placeholder="{\n  \"example\": true\n}"></textarea>
+        </div>
+      </div>
+    </div>
   </main>
   <script>
+    // Data elements
     const out = document.getElementById('output');
-  const statusEl = document.getElementById('clear-status');
+    const statusEl = document.getElementById('clear-status');
+    const projectInput = document.getElementById('project');
+    const configProjectInput = document.getElementById('config-project');
+  const sessionsSection = document.getElementById('sessions-section');
+  const sessionsList = document.getElementById('sessions-list');
+  const genBar = document.getElementById('gen-bar');
+  const genBtn = document.getElementById('gen-btn');
+  const genStatus = document.getElementById('gen-status');
+    // Config elements
+    const configVersionInput = document.getElementById('config-version');
+    const configView = document.getElementById('config-view');
+    const configStatus = document.getElementById('config-status');
+    const configMeta = document.getElementById('config-meta');
+    const configEditor = document.getElementById('config-editor');
+
+    function syncProjectToConfig() {
+      configProjectInput.value = projectInput.value.trim();
+    }
+    projectInput.addEventListener('input', () => { syncProjectToConfig(); });
     document.getElementById('load').addEventListener('click', async () => {
       const project = document.getElementById('project').value.trim();
       const session = document.getElementById('session').value.trim();
@@ -54,7 +141,15 @@
       const res = await fetch(`/api/data?${params.toString()}`);
       if (!res.ok) { out.textContent = 'Error: ' + res.statusText; return; }
       const data = await res.json();
-      if (view === 'flat') renderFlat(data); else renderNested(normalizeResponse(data));
+      if (view === 'flat') {
+        renderFlat(data);
+      } else {
+        const norm = normalizeResponse(data);
+        renderNested(norm);
+        setupSessionSelection(norm.data);
+      }
+      // Also fetch config latest after data load if project defined
+      await loadConfig();
     });
 
     document.getElementById('clear-project').addEventListener('click', async () => {
@@ -77,6 +172,58 @@
       const data = await res.json();
       statusEl.textContent = `Cleared all data. Removed ${data.removed ?? 0} entries.`;
       out.innerHTML = '';
+    });
+
+    async function loadConfig(explicit = false) {
+      const project = projectInput.value.trim();
+      if (!project) { if (explicit) alert('Enter project'); return; }
+      syncProjectToConfig();
+      configStatus.textContent = 'Loading...';
+      const version = configVersionInput.value ? Number(configVersionInput.value) : undefined;
+      const params = new URLSearchParams({ project });
+      if (version) params.set('version', String(version));
+      try {
+        const res = await fetch(`/api/config?${params.toString()}`);
+        if (!res.ok) {
+          configStatus.textContent = 'Not found';
+          configView.textContent = '(no config)';
+          configMeta.textContent = '';
+          return;
+        }
+        const data = await res.json();
+        configView.textContent = JSON.stringify(data.config, null, 2);
+        configMeta.textContent = `version ${data.version} (latest ${data.latest})`;
+        configStatus.textContent = 'Loaded';
+        // Prefill editor with current config as starting point
+        if (!configEditor.value.trim()) configEditor.value = JSON.stringify(data.config, null, 2);
+      } catch (e) {
+        configStatus.textContent = 'Error fetching config';
+      }
+    }
+
+    document.getElementById('config-load').addEventListener('click', () => loadConfig(true));
+    configVersionInput.addEventListener('keydown', e => { if (e.key === 'Enter') loadConfig(true); });
+    document.getElementById('config-new-version').addEventListener('click', async () => {
+      const project = projectInput.value.trim();
+      if (!project) { alert('Enter project'); return; }
+      let parsed;
+      try {
+        parsed = JSON.parse(configEditor.value || 'null');
+      } catch (e) {
+        alert('Editor content is not valid JSON');
+        return;
+      }
+      configStatus.textContent = 'Saving new version...';
+      try {
+        const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project, config: parsed }) });
+        if (!res.ok) { configStatus.textContent = 'Save failed'; return; }
+        const data = await res.json();
+        configStatus.textContent = 'Saved v' + data.version;
+        configVersionInput.value = '';
+        await loadConfig();
+      } catch (e) {
+        configStatus.textContent = 'Error saving';
+      }
     });
 
     function renderFlat({ project, items }) {
@@ -179,6 +326,83 @@
       tree.appendChild(ul);
       out.appendChild(tree);
     }
+
+    function setupSessionSelection(data) {
+      // data is { session -> tag -> desc -> items[] }
+      const sessions = Object.keys(data);
+      if (!sessions.length) {
+        sessionsSection.style.display = 'none';
+        return;
+      }
+      sessionsSection.style.display = 'block';
+      sessionsList.innerHTML = '';
+      genStatus.textContent = '';
+      genBar.style.display = 'none';
+      for (const sess of sessions) {
+        const count = Object.values(data[sess] || {}).reduce((acc, tagMap) => {
+          for (const desc in tagMap) acc += (tagMap[desc] || []).length;
+          return acc;
+        }, 0);
+        const id = `sess-${sess}`;
+        const label = document.createElement('label');
+        label.style.display = 'flex';
+        label.style.alignItems = 'center';
+        label.style.gap = '6px';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.id = id;
+        cb.dataset.session = sess;
+        // default unselected
+        cb.addEventListener('change', onSessionSelectionChanged);
+        const span = document.createElement('span');
+        span.innerHTML = `<span class="pill">${sess}</span> <span class="muted">(${count} items)</span>`;
+        label.appendChild(cb);
+        label.appendChild(span);
+        sessionsList.appendChild(label);
+      }
+    }
+
+    function selectedSessions() {
+      return Array.from(sessionsList.querySelectorAll('input[type=checkbox]:checked')).map(el => el.dataset.session);
+    }
+
+    function onSessionSelectionChanged() {
+      const any = selectedSessions().length > 0;
+      genBar.style.display = any ? 'flex' : 'none';
+      genStatus.textContent = any ? '' : '';
+    }
+
+    genBtn.addEventListener('click', async () => {
+      const project = projectInput.value.trim();
+      if (!project) { alert('Enter project'); return; }
+      const sessions = selectedSessions();
+      if (!sessions.length) { alert('Select at least one session'); return; }
+      genStatus.textContent = 'Generating...';
+      genBtn.disabled = true;
+      try {
+        const res = await fetch('/api/gen', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project, sessions })
+        });
+        if (!res.ok) {
+          genStatus.textContent = 'Generation failed';
+        } else {
+          const data = await res.json();
+          if (data.ok) {
+            genStatus.textContent = `Generated config version ${data.version}`;
+            // refresh latest config view
+            await loadConfig();
+          } else {
+            genStatus.textContent = 'Generation error';
+          }
+        }
+      } catch (e) {
+        genStatus.textContent = 'Error calling /api/gen';
+      } finally {
+        genBtn.disabled = false;
+      }
+    });
 
     function escapeHtml(str) {
       return str.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));

@@ -11,10 +11,10 @@
   "scripts": {
     "build": "npm run -ws build",
     "clean": "npm run -ws clean",
-    "start": "npm --workspace testbed run start",
+    "start:testbed": "npm --workspace testbed run start",
+    "dev:testbed": "npm --workspace testbed run dev",
     "start:datalake": "npm --workspace datalake run start",
-    "dev:datalake": "npm --workspace datalake run dev",
-    "lint": "echo 'No linter configured'"
+    "dev:datalake": "npm --workspace datalake run dev"
   },
   "devDependencies": {
     "typescript": "^5.5.4"

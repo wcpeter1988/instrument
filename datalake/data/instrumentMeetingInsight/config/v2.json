@@ -1,0 +1,48 @@
+{
+  "version": 2,
+  "generatedAt": "2025-10-17T01:17:05.327Z",
+  "metrics": [
+    {
+      "name": "insightHasSummary",
+      "description": "Output has 'Summary' prefix",
+      "longDescription": "Validates that getMeetingInsight output begins with the expected 'Summary:' prefix derived from the prompt marker.",
+      "methodology": "string_match",
+      "query": {
+        "target": "getMeetingInsight.return",
+        "expected": "getMeetingInsight.vars.prompt.value"
+      },
+      "params": {
+        "caseSensitive": false
+      }
+    },
+    {
+      "name": "fetchContextRelevanceQag",
+      "description": "Answer includes question keywords",
+      "longDescription": "Checks semantic/keyword overlap between the question and the generated answer using a QAG heuristic / mock LLM scoring.",
+      "methodology": "QAG",
+      "promptTemplate": "Grade answer according to rubric (keywords). Question: {{question}}\nAnswer: {{answer}}\nRubric: {{reference}}\nReturn 0..1",
+      "query": {
+        "question": "fetchContext.args.question",
+        "answer": "fetchContext.return",
+        "reference": "fetchContext.args.question"
+      },
+      "params": {
+        "threshold": 0.4
+      }
+    },
+    {
+      "name": "planCoverageDag",
+      "description": "Expected steps all present",
+      "longDescription": "Measures coverage: each expected plan step appears in the produced list; simple containment ratio used for scoring.",
+      "methodology": "DAG",
+      "promptTemplate": "Compare expected steps to actual plan steps. Expected: {{reference}} Actual: {{steps}} Return coverage",
+      "query": {
+        "reference": "planGenerator.return",
+        "steps": "planGenerator.return"
+      },
+      "params": {
+        "threshold": 0.6
+      }
+    }
+  ]
+}

@@ -99,7 +99,16 @@ const sessionStore = new AsyncLocalStorage<InstrumentSession | undefined>();
 // Start a session and automatically attach an in-memory collector. Returns the live units array.
 // Backward compatibility: previous return was a disposer fn; now we return units[] while endInstrumentSession disposes.
 export function startInstrumentSession(project: string, sessionId: string, endpoint?: string): LogUnit[] {
-	sessionStore.enterWith({ project, sessionId, endpoint });
+	// Normalize endpoint: allow passing base service URL (http://host:port) or full /api/data path.
+	let ep = endpoint;
+	if (ep) {
+		// If user passed base like http://localhost:3300, append /api/data
+		if (!/\/api\/data$/.test(ep)) {
+			// avoid double slashes
+			ep = ep.replace(/\/$/, '') + '/api/data';
+		}
+	}
+	sessionStore.enterWith({ project, sessionId, endpoint: ep });
 	// auto attach collector (forward to endpoint by default)
 	const sess = getInstrumentSession();
 	if (!sess) throw new Error('Failed to initialize instrument session');
@@ -158,16 +167,23 @@ export function endpointSink(endpoint: string | undefined) {
 					},
 				},
 				(res) => {
+					// consume to free socket
 					res.on('data', () => {});
+					if (res.statusCode && res.statusCode >= 400) {
+						// eslint-disable-next-line no-console
+						console.warn('[instrument-upload-fail]', res.statusCode, endpoint);
+					}
 				}
 			);
-			req.on('error', () => {
-				// ignore transport errors
+			req.on('error', (err) => {
+				// eslint-disable-next-line no-console
+				console.warn('[instrument-upload-error]', endpoint, (err as any)?.message || err);
 			});
 			req.write(body);
 			req.end();
-		} catch {
-			// invalid endpoint; fall back silently
+		} catch (err) {
+			// eslint-disable-next-line no-console
+			console.warn('[instrument-endpoint-invalid]', endpoint, (err as any)?.message || err);
 		}
 	};
 }

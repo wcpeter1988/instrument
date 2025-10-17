@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "generatedAt": "2025-10-17T02:45:10.092Z",
+  "version": 5,
+  "generatedAt": "2025-10-17T02:50:29.540Z",
   "metrics": [
     {
       "name": "insightHasSummary",
@@ -42,6 +42,19 @@
       },
       "params": {
         "threshold": 0.6
+      }
+    },
+    {
+      "name": "annotation_summary2",
+      "description": "Auto-generated metric derived from annotation key 'summary2'.",
+      "longDescription": "This metric leverages user-provided annotations (tagId=annotations). It surfaces the 'summary2' field for downstream evaluation.",
+      "methodology": "string_match",
+      "query": {
+        "summary2": "annotations.summary2"
+      },
+      "params": {
+        "sampleValue": "mocked summarization text",
+        "generatedFromAnnotations": true
       }
     }
   ]

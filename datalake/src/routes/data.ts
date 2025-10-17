@@ -32,6 +32,25 @@ export function createDataRouter(DATA_DIR: string) {
     );
     ensureDir(dir);
     const file = path.join(dir, 'items.jsonl');
+    // Special override semantics for annotations: always replace existing with latest payload
+    const isAnnotations = tagid === 'annotations' && description === 'annotations';
+    if (isAnnotations) {
+      const incoming = item?.payload?.annotations && typeof item.payload.annotations === 'object' ? item.payload.annotations : {};
+      const normalized: Record<string, string> = {};
+      for (const [k, v] of Object.entries(incoming)) {
+        if (typeof v === 'string') normalized[k] = v;
+      }
+      const overrideItem = {
+        project,
+        session,
+        tagid,
+        description,
+        timestamp: item.timestamp,
+        payload: { annotations: normalized }
+      };
+      fs.writeFileSync(file, JSON.stringify(overrideItem) + '\n', 'utf8');
+      return;
+    }
     const line = JSON.stringify(item) + '\n';
     fs.appendFileSync(file, line, 'utf8');
   }

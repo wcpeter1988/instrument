@@ -69,14 +69,7 @@
       <div class="content">
         <div id="clear-status" class="status muted" style="margin-bottom:8px;"></div>
         <section id="output"></section>
-        <div id="sessions-section" class="sessions-select" style="display:none;">
-          <h4>Sessions</h4>
-          <div id="sessions-list" class="sessions-list"></div>
-          <div id="gen-bar" class="gen-bar" style="display:none;">
-            <button id="gen-btn">Generate Config</button>
-            <span id="gen-status" class="status muted"></span>
-          </div>
-        </div>
+        <!-- Inline session selection now lives inside the data tree; generation controls appended below -->
       </div>
     </div>
     <!-- Config Pane -->
@@ -112,11 +105,7 @@
     const statusEl = document.getElementById('clear-status');
     const projectInput = document.getElementById('project');
     const configProjectInput = document.getElementById('config-project');
-  const sessionsSection = document.getElementById('sessions-section');
-  const sessionsList = document.getElementById('sessions-list');
-  const genBar = document.getElementById('gen-bar');
-  const genBtn = document.getElementById('gen-btn');
-  const genStatus = document.getElementById('gen-status');
+  let genBtn; let genStatus; // created dynamically
     // Config elements
     const configVersionInput = document.getElementById('config-version');
     const configView = document.getElementById('config-view');
@@ -146,7 +135,6 @@
       } else {
         const norm = normalizeResponse(data);
         renderNested(norm);
-        setupSessionSelection(norm.data);
       }
       // Also fetch config latest after data load if project defined
       await loadConfig();
@@ -293,9 +281,164 @@
       const tree = document.createElement('div');
       tree.className = 'tree';
       const ul = document.createElement('ul');
+      const selected = new Set();
       for (const sess in data) {
         const liSess = document.createElement('li');
-        liSess.innerHTML = `<strong>session:</strong> <code>${sess}</code>`;
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.dataset.session = sess;
+        cb.addEventListener('change', () => {
+          if (cb.checked) selected.add(sess); else selected.delete(sess);
+          updateGenControls(selected);
+        });
+        const sessLabel = document.createElement('span');
+        sessLabel.innerHTML = `<strong>session:</strong> <code>${sess}</code>`;
+        const headerWrap = document.createElement('div');
+        headerWrap.style.display = 'flex';
+        headerWrap.style.alignItems = 'center';
+        headerWrap.style.gap = '6px';
+        headerWrap.appendChild(cb);
+        headerWrap.appendChild(sessLabel);
+
+        // Annotation controls per session
+        const annotateBtn = document.createElement('button');
+        annotateBtn.textContent = 'Annotate';
+        annotateBtn.style.fontSize = '12px';
+        annotateBtn.dataset.mode = 'view'; // view | edit
+        const annotateStatus = document.createElement('span');
+        annotateStatus.className = 'status muted';
+        annotateStatus.style.fontSize = '11px';
+        const annotationEditorId = `annot-editor-${sess}`;
+
+        function createEditor(existingPairs = {}) {
+          const wrap = document.createElement('div');
+          wrap.id = annotationEditorId;
+          wrap.style.border = '1px solid var(--border)';
+          wrap.style.padding = '6px 8px';
+          wrap.style.borderRadius = '4px';
+          wrap.style.background = 'var(--bg-alt)';
+          wrap.style.margin = '4px 0 8px 24px';
+          const title = document.createElement('div');
+          title.style.display = 'flex';
+          title.style.justifyContent = 'space-between';
+          title.style.alignItems = 'center';
+          title.innerHTML = `<strong>Annotations (key:value)</strong>`;
+          wrap.appendChild(title);
+          const list = document.createElement('div');
+          list.style.display = 'flex';
+          list.style.flexDirection = 'column';
+          list.style.gap = '4px';
+          wrap.appendChild(list);
+          function addRow(key = '', value = '') {
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.gap = '4px';
+            row.style.alignItems = 'center';
+            const k = document.createElement('input');
+            k.placeholder = 'key';
+            k.value = key;
+            k.style.flex = '0 0 140px';
+            const v = document.createElement('input');
+            v.placeholder = 'value';
+            v.value = value;
+            v.style.flex = '1';
+            const del = document.createElement('button');
+            del.textContent = '✕';
+            del.title = 'Remove pair';
+            del.style.fontSize = '11px';
+            del.addEventListener('click', () => row.remove());
+            row.appendChild(k); row.appendChild(v); row.appendChild(del);
+            list.appendChild(row);
+          }
+          // Populate existing pairs first
+          const keys = Object.keys(existingPairs);
+          if (keys.length) {
+            for (const k of keys) {
+              const v = typeof existingPairs[k] === 'string' ? existingPairs[k] : '';
+              addRow(k, v);
+            }
+          }
+          // Trailing blank row for new input
+          addRow();
+          const addBtn = document.createElement('button');
+          addBtn.textContent = 'Add Pair';
+          addBtn.style.fontSize = '12px';
+          addBtn.addEventListener('click', () => addRow());
+          wrap.appendChild(addBtn);
+          return wrap;
+        }
+
+        annotateBtn.addEventListener('click', async () => {
+          const mode = annotateBtn.dataset.mode;
+          const project = projectInput.value.trim();
+          if (!project) { alert('Enter project first'); return; }
+          if (mode === 'view') {
+            // Enter edit mode
+            annotateBtn.textContent = 'Save';
+            annotateBtn.dataset.mode = 'edit';
+            annotateStatus.textContent = '';
+            // Create editor if not exists
+            if (!liSess.querySelector(`#${annotationEditorId}`)) {
+              // Find existing annotations for this session
+              let existingPairs = {};
+              const annTag = data[sess]['annotations'];
+              if (annTag) {
+                const annDesc = annTag['annotations'];
+                if (annDesc && Array.isArray(annDesc)) {
+                  // Backend merge guarantees at most one item
+                  const first = annDesc[0];
+                  const annPayload = first && first.payload && first.payload.annotations;
+                  if (annPayload && typeof annPayload === 'object') {
+                    for (const [k, v] of Object.entries(annPayload)) {
+                      if (typeof v === 'string') existingPairs[k] = v;
+                    }
+                  }
+                }
+              }
+              liSess.insertBefore(createEditor(existingPairs), liSess.firstChild.nextSibling); // after headerWrap
+            }
+          } else if (mode === 'edit') {
+            // Collect and save
+            const editor = liSess.querySelector(`#${annotationEditorId}`);
+            if (!editor) { annotateStatus.textContent = 'Editor missing'; return; }
+            const rows = Array.from(editor.querySelectorAll('div > input[placeholder="key"]')).map(kInput => kInput.parentElement);
+            const annotations = {};
+            let invalid = false;
+            for (const row of rows) {
+              const inputs = row.querySelectorAll('input');
+              const key = inputs[0].value.trim();
+              const value = inputs[1].value.trim();
+              if (!key && !value) continue; // skip empty row
+              if (!key) { invalid = true; annotateStatus.textContent = 'Annotation key required'; break; }
+              annotations[key] = value;
+            }
+            if (invalid) return;
+            annotateStatus.textContent = 'Saving...';
+            annotateBtn.disabled = true;
+            try {
+              const body = { project, session: sess, tagid: 'annotations', description: 'annotations', timestamp: Date.now(), payload: { annotations } };
+              const res = await fetch('/api/data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+              if (!res.ok) {
+                annotateStatus.textContent = 'Save failed';
+              } else {
+                annotateStatus.textContent = 'Saved';
+                // Exit edit mode
+                annotateBtn.textContent = 'Annotate';
+                annotateBtn.dataset.mode = 'view';
+                editor.remove();
+                // Optionally reload data to display new annotations
+                setTimeout(() => document.getElementById('load').click(), 300);
+              }
+            } catch (e) {
+              annotateStatus.textContent = 'Error saving';
+            } finally {
+              annotateBtn.disabled = false;
+            }
+          }
+        });
+        headerWrap.appendChild(annotateBtn);
+        headerWrap.appendChild(annotateStatus);
+        liSess.appendChild(headerWrap);
         const ulPairs = document.createElement('ul');
         // Collapse by tagid: merge all descriptions under the same tagid and pick the first description as label
         const byTag = {};
@@ -325,84 +468,54 @@
       }
       tree.appendChild(ul);
       out.appendChild(tree);
-    }
-
-    function setupSessionSelection(data) {
-      // data is { session -> tag -> desc -> items[] }
-      const sessions = Object.keys(data);
-      if (!sessions.length) {
-        sessionsSection.style.display = 'none';
-        return;
-      }
-      sessionsSection.style.display = 'block';
-      sessionsList.innerHTML = '';
-      genStatus.textContent = '';
-      genBar.style.display = 'none';
-      for (const sess of sessions) {
-        const count = Object.values(data[sess] || {}).reduce((acc, tagMap) => {
-          for (const desc in tagMap) acc += (tagMap[desc] || []).length;
-          return acc;
-        }, 0);
-        const id = `sess-${sess}`;
-        const label = document.createElement('label');
-        label.style.display = 'flex';
-        label.style.alignItems = 'center';
-        label.style.gap = '6px';
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.id = id;
-        cb.dataset.session = sess;
-        // default unselected
-        cb.addEventListener('change', onSessionSelectionChanged);
-        const span = document.createElement('span');
-        span.innerHTML = `<span class="pill">${sess}</span> <span class="muted">(${count} items)</span>`;
-        label.appendChild(cb);
-        label.appendChild(span);
-        sessionsList.appendChild(label);
-      }
-    }
-
-    function selectedSessions() {
-      return Array.from(sessionsList.querySelectorAll('input[type=checkbox]:checked')).map(el => el.dataset.session);
-    }
-
-    function onSessionSelectionChanged() {
-      const any = selectedSessions().length > 0;
-      genBar.style.display = any ? 'flex' : 'none';
-      genStatus.textContent = any ? '' : '';
-    }
-
-    genBtn.addEventListener('click', async () => {
-      const project = projectInput.value.trim();
-      if (!project) { alert('Enter project'); return; }
-      const sessions = selectedSessions();
-      if (!sessions.length) { alert('Select at least one session'); return; }
-      genStatus.textContent = 'Generating...';
+      // Generation controls appended below tree
+      const controls = document.createElement('div');
+      controls.style.marginTop = '12px';
+      genBtn = document.createElement('button');
+      genBtn.textContent = 'Generate Config';
       genBtn.disabled = true;
-      try {
-        const res = await fetch('/api/gen', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ project, sessions })
-        });
-        if (!res.ok) {
-          genStatus.textContent = 'Generation failed';
-        } else {
-          const data = await res.json();
-          if (data.ok) {
-            genStatus.textContent = `Generated config version ${data.version}`;
-            // refresh latest config view
-            await loadConfig();
+      genStatus = document.createElement('span');
+      genStatus.className = 'status muted';
+      genStatus.style.marginLeft = '8px';
+      controls.appendChild(genBtn);
+      controls.appendChild(genStatus);
+      out.appendChild(controls);
+      genBtn.addEventListener('click', async () => {
+        const project = projectInput.value.trim();
+        if (!project) { alert('Enter project'); return; }
+        if (!selected.size) { alert('Select at least one session'); return; }
+        genStatus.textContent = 'Generating...';
+        genBtn.disabled = true;
+        try {
+          const res = await fetch('/api/gen', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project, sessions: Array.from(selected) })
+          });
+          if (!res.ok) {
+            genStatus.textContent = 'Generation failed';
           } else {
-            genStatus.textContent = 'Generation error';
+            const data = await res.json();
+            if (data.ok) {
+              genStatus.textContent = `Generated config version ${data.version}`;
+              await loadConfig();
+            } else {
+              genStatus.textContent = 'Generation error';
+            }
           }
+        } catch (e) {
+          genStatus.textContent = 'Error calling /api/gen';
+        } finally {
+          genBtn.disabled = selected.size === 0;
         }
-      } catch (e) {
-        genStatus.textContent = 'Error calling /api/gen';
-      } finally {
-        genBtn.disabled = false;
+      });
+      function updateGenControls(sel) {
+        genBtn.disabled = sel.size === 0;
+        genStatus.textContent = sel.size ? '' : '';
       }
-    });
+    }
+
+    // Removed separate session selection block in favor of inline checkboxes
+    // (Removed stale duplicate genBtn handler that referenced deprecated selectedSessions())
 
     function escapeHtml(str) {
       return str.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));

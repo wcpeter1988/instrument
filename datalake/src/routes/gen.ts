@@ -40,18 +40,22 @@ export function createGenRouter(DATA_DIR: string) {
               const parsed = JSON.parse(line);
               // Map persisted item shape to LogUnit expected by autogen (best-effort)
               // persisted: { project, session, tagid, description, timestamp, payload }
+              const isAnnotations = String(parsed.tagid || tagid) === 'annotations' && String(parsed.description || desc) === 'annotations';
+              const baseArgs = parsed.payload?.args || {};
+              const annObj = isAnnotations ? parsed.payload?.annotations : undefined;
               const lu: LogUnit = {
                 tagId: String(parsed.tagid || parsed.tagId || tagid),
                 timestamp: Number(parsed.timestamp) || Date.now(),
                 session: parsed.session || session,
                 project: parsed.project || project,
                 payload: {
-                  args: parsed.payload?.args || {},
+                  args: baseArgs,
                   vars: parsed.payload?.vars || {},
                   return: parsed.payload?.return,
                   error: parsed.payload?.error,
                   end: parsed.payload?.end,
-                  durationMs: parsed.payload?.durationMs
+                  durationMs: parsed.payload?.durationMs,
+                  ...(annObj && typeof annObj === 'object' ? { annotations: annObj } : {})
                 }
               };
               units.push(lu);

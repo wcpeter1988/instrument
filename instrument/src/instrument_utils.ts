@@ -92,13 +92,17 @@ export interface InstrumentSession {
   // Optional in-memory sink/collection for current session
   sink?: (unit: LogUnit) => void;
   units?: LogUnit[];
+	// Optional replay data: map tagId -> array of units to replay
+	replay?: Record<string, LogUnit[]>;
+	// Internal counters to track position in replay arrays
+	replayCursor?: Record<string, number>;
 }
 
 const sessionStore = new AsyncLocalStorage<InstrumentSession | undefined>();
 
 // Start a session and automatically attach an in-memory collector. Returns the live units array.
 // Backward compatibility: previous return was a disposer fn; now we return units[] while endInstrumentSession disposes.
-export function startInstrumentSession(project: string, sessionId: string, endpoint?: string): LogUnit[] {
+export function startInstrumentSession(project: string, sessionId: string, endpoint?: string, autoReplay: boolean = true): LogUnit[] {
 	// Normalize endpoint: allow passing base service URL (http://host:port) or full /api/data path.
 	let ep = endpoint;
 	if (ep) {
@@ -122,6 +126,65 @@ export function startInstrumentSession(project: string, sessionId: string, endpo
 		};
 		sess.units = units;
 	}
+
+	// Attempt auto replay retrieval (non-blocking)
+	if (autoReplay && sess.endpoint) {
+		try {
+			const url = new URL(sess.endpoint);
+			// Replace /api/data with query variant
+			const base = sess.endpoint.replace(/\/api\/data$/, '');
+			const getUrl = `${base}/api/data?project=${encodeURIComponent(project)}&session=${encodeURIComponent(sessionId)}`;
+			const isHttps = url.protocol === 'https:';
+			const client = isHttps ? https : http;
+			const req = client.get(getUrl, (res) => {
+				let data = '';
+				res.on('data', (chunk) => (data += chunk));
+				res.on('end', () => {
+					try {
+						const json = JSON.parse(data);
+						if (json && json.data && typeof json.data === 'object') {
+							const collected: LogUnit[] = [];
+							// Traverse nested structure session>tagid>description
+							const sessionsObj = json.data;
+							for (const sessKey of Object.keys(sessionsObj)) {
+								const tagMap = sessionsObj[sessKey];
+								for (const tagId of Object.keys(tagMap)) {
+									const descMap = tagMap[tagId];
+									for (const desc of Object.keys(descMap)) {
+										for (const item of descMap[desc]) {
+											if (!item || typeof item !== 'object') continue;
+											collected.push({
+												tagId: item.tagid || tagId,
+												timestamp: typeof item.timestamp === 'number' ? item.timestamp : Date.now(),
+												session: item.session,
+												project: item.project,
+												payload: item.payload || {},
+											});
+										}
+									}
+								}
+							}
+							if (collected.length) {
+								setInstrumentSessionReplay(collected);
+								// eslint-disable-next-line no-console
+								console.log('[instrument][replay-load]', {
+									project,
+									sessionId,
+									units: collected.length,
+									tagIds: Object.keys(sess.replay || {})
+								});
+							}
+						}
+					} catch {
+						/* swallow */
+					}
+				});
+			});
+			req.on('error', () => {});
+		} catch {
+			// ignore fetch errors
+		}
+	}
 	return sess.units!;
 }
 
@@ -135,6 +198,57 @@ export function endInstrumentSession() {
 
 export function getInstrumentSession(): InstrumentSession | undefined {
 	return sessionStore.getStore();
+}
+
+// Attach replay units to current session; units will override emitted unit fields (args, vars, return)
+export function setInstrumentSessionReplay(units: LogUnit[]) {
+	const sess = getInstrumentSession();
+	if (!sess) throw new Error('setInstrumentSessionReplay must be called within an active instrument session');
+	const byTag: Record<string, LogUnit[]> = {};
+	for (const u of units) {
+		if (!byTag[u.tagId]) byTag[u.tagId] = [];
+		byTag[u.tagId].push(u);
+	}
+	sess.replay = byTag;
+	sess.replayCursor = {};
+}
+
+export function clearInstrumentSessionReplay() {
+	const sess = getInstrumentSession();
+	if (!sess) return;
+	delete sess.replay;
+	delete sess.replayCursor;
+}
+
+function applyReplayIfAvailable(payload: LogPayload, originalUnit: LogUnit): LogUnit {
+	const sess = getInstrumentSession();
+	if (!sess?.replay) return originalUnit;
+	const list = sess.replay[payload.label];
+	if (!list || list.length === 0) return originalUnit;
+	const cursor = sess.replayCursor![payload.label] || 0;
+	const replayUnit = list[Math.min(cursor, list.length - 1)];
+	sess.replayCursor![payload.label] = cursor + 1;
+	// Override args/vars/return from replayUnit.payload
+	const merged: LogUnit = {
+		...originalUnit,
+		payload: {
+			...originalUnit.payload,
+			args: replayUnit.payload.args ?? originalUnit.payload.args,
+			vars: replayUnit.payload.vars ?? originalUnit.payload.vars,
+			return: replayUnit.payload.return ?? originalUnit.payload.return,
+			replayed: true,
+		},
+	};
+	// eslint-disable-next-line no-console
+	console.log('[instrument][replay-override]', {
+		label: payload.label,
+		cursor,
+		replayCount: list.length,
+		usedIndex: Math.min(cursor, list.length - 1),
+		originalTimestamp: originalUnit.timestamp,
+		replayTimestamp: replayUnit.timestamp,
+	});
+	return merged;
 }
 
 // Create a sink that posts LogUnits to a datalake-compatible endpoint.
@@ -245,7 +359,24 @@ export function LogMethod(options: InstrumentOptions = {}) {
 						}
 						if (Object.keys(argMap).length) (payload as any).args = argMap;
 					if (options.includeThis) (payload as any).thisArg = toJSONish(this, options.redact ?? defaultRedact);
-					const result = original.apply(this, args);
+					// Support mockReturn: short-circuit original implementation when provided.
+					let result: any;
+					let usedMock = false;
+					if (options.mockReturn !== undefined) {
+						usedMock = true;
+						if (typeof options.mockReturn === 'function') {
+							try {
+								result = (options.mockReturn as any)({ args, thisArg: this, label, original });
+							} catch (err) {
+								// If mock factory throws, treat as error path similar to original throwing
+								throw err;
+							}
+						} else {
+							result = options.mockReturn;
+						}
+					} else {
+						result = original.apply(this, args);
+					}
 					if (isPromiseLike(result)) {
 						return (result as Promise<any>)
 							.then((res) => {
@@ -253,7 +384,7 @@ export function LogMethod(options: InstrumentOptions = {}) {
 								if (shouldLogReturn) (payload as any).return = toJSONish(res, options.redact ?? defaultRedact);
 								(payload as any).end = Date.now();
 								(payload as any).durationMs = (payload as any).end - start;
-								const unit: LogUnit = {
+								let unit: LogUnit = {
 									tagId: (payload as any).label,
 									timestamp: (payload as any).start,
 									session: (payload as any).sessionId,
@@ -266,8 +397,10 @@ export function LogMethod(options: InstrumentOptions = {}) {
 										error: (payload as any).error,
 										end: (payload as any).end,
 										durationMs: (payload as any).durationMs,
+										mocked: usedMock || undefined,
 									},
 								};
+											unit = applyReplayIfAvailable(payload, unit);
 								sink(unit);
 								return res;
 							})
@@ -298,7 +431,7 @@ export function LogMethod(options: InstrumentOptions = {}) {
 						if (shouldLogReturn) (payload as any).return = toJSONish(result, options.redact ?? defaultRedact);
 						(payload as any).end = Date.now();
 						(payload as any).durationMs = (payload as any).end - start;
-						const unit: LogUnit = {
+						let unit: LogUnit = {
 							tagId: (payload as any).label,
 							timestamp: (payload as any).start,
 							session: (payload as any).sessionId,
@@ -311,8 +444,10 @@ export function LogMethod(options: InstrumentOptions = {}) {
 								error: (payload as any).error,
 								end: (payload as any).end,
 								durationMs: (payload as any).durationMs,
+								mocked: usedMock || undefined,
 							},
 						};
+						unit = applyReplayIfAvailable(payload, unit);
 						sink(unit);
 						return result;
 					}
@@ -320,7 +455,7 @@ export function LogMethod(options: InstrumentOptions = {}) {
 					(payload as any).error = err?.stack || String(err);
 					(payload as any).end = Date.now();
 					(payload as any).durationMs = (payload as any).end - start;
-					const unit: LogUnit = {
+					let unit: LogUnit = {
 						tagId: (payload as any).label,
 						timestamp: (payload as any).start,
 						session: (payload as any).sessionId,
@@ -335,6 +470,7 @@ export function LogMethod(options: InstrumentOptions = {}) {
 							durationMs: (payload as any).durationMs,
 						},
 					};
+					unit = applyReplayIfAvailable(payload, unit);
 					sink(unit);
 					throw err;
 				}
@@ -447,13 +583,24 @@ export function logCall<T extends Function>(fn: T, options: InstrumentOptions = 
 			parts.push('this=' + safeStringify(this, redact));
 		}
 		logger(parts.join(' '));
-		const result = (fn as any).apply(this, args);
+		let result: any;
+		let usedMock = false;
+		if (options.mockReturn !== undefined) {
+			usedMock = true;
+			if (typeof options.mockReturn === 'function') {
+				result = (options.mockReturn as any)({ args, thisArg: this, label: callLabel, original: fn });
+			} else {
+				result = options.mockReturn;
+			}
+		} else {
+			result = (fn as any).apply(this, args);
+		}
 		if (result && typeof (result as any).then === 'function') {
 			return (result as any)
 				.then((res: any) => {
 					const shouldLogReturn = (options.logReturn ?? (options as any).return) !== false;
 					if (shouldLogReturn) {
-						logger(`[return] ${callLabel} -> ` + safeStringify(res, redact));
+						logger(`[return] ${callLabel} -> ` + safeStringify(res, redact) + (usedMock ? ' [mocked]' : ''));
 					}
 					return res;
 				})
@@ -464,7 +611,7 @@ export function logCall<T extends Function>(fn: T, options: InstrumentOptions = 
 		} else {
 			const shouldLogReturn = (options.logReturn ?? (options as any).return) !== false;
 			if (shouldLogReturn) {
-				logger(`[return] ${callLabel} -> ` + safeStringify(result, redact));
+				logger(`[return] ${callLabel} -> ` + safeStringify(result, redact) + (usedMock ? ' [mocked]' : ''));
 			}
 			return result;
 		}
@@ -571,11 +718,22 @@ export function instrument<T extends object | AnyFn>(
 			const { logger = console.log, redact = defaultRedact } = options;
 			logger(`[call] ${label}(` + formatArgs(args, redact) + ')' + (includeThis ? ' this=' + safeStringify(this, redact) : ''));
 			try {
-				const result = fn.apply(this, args);
+				let result: any;
+				let usedMock = false;
+				if (options.mockReturn !== undefined) {
+					usedMock = true;
+					if (typeof options.mockReturn === 'function') {
+						result = (options.mockReturn as any)({ args, thisArg: this, label, original: fn });
+					} else {
+						result = options.mockReturn;
+					}
+				} else {
+					result = fn.apply(this, args);
+				}
 				if (isPromiseLike(result)) {
 					return (result as Promise<any>)
 						.then((res) => {
-							logger(`[return] ${label} -> ` + safeStringify(res, redact));
+							logger(`[return] ${label} -> ` + safeStringify(res, redact) + (usedMock ? ' [mocked]' : ''));
 							return res;
 						})
 						.catch((err) => {
@@ -583,7 +741,7 @@ export function instrument<T extends object | AnyFn>(
 							throw err;
 						});
 				} else {
-					logger(`[return] ${label} -> ` + safeStringify(result, redact));
+					logger(`[return] ${label} -> ` + safeStringify(result, redact) + (usedMock ? ' [mocked]' : ''));
 					return result;
 				}
 			} catch (err: any) {

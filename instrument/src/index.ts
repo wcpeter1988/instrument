@@ -15,6 +15,15 @@ export interface InstrumentOptions {
   // eslint-disable-next-line @typescript-eslint/ban-types
   return?: boolean;
   sink?: (payload: LogUnit) => void;
+  /**
+   * Provide a mock return value for the instrumented function/method.
+   * When defined, the original implementation will NOT be invoked; instead the mock value (or the result of the factory) is returned.
+   * - Static value: mockReturn: someValue
+   * - Factory: mockReturn: ({ args, thisArg, label, original }) => any | Promise<any>
+   * If the factory returns a Promise it is awaited transparently.
+   * The mocked value is treated as the function result for logging (subject to logReturn option).
+   */
+  mockReturn?: any | ((ctx: { args: any[]; thisArg: any; label: string; original: Function }) => any | Promise<any>);
 }
 
 // Re-export all public instrumentation APIs from utils
@@ -31,6 +40,8 @@ export {
   logVars,
   instrument,
   attachSessionCollector,
+  setInstrumentSessionReplay,
+  clearInstrumentSessionReplay,
 } from './instrument_utils';
 export type { InstrumentSession } from './instrument_utils';
 export * from '@workspace/common';

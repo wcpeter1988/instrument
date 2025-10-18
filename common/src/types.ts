@@ -19,8 +19,6 @@ export interface LogUnit {
     durationMs?: number;
     // Indicates the unit values (args/vars/return) were overridden from a replay source
     replayed?: boolean;
-    // Indicates the return value was mocked via InstrumentOptions.mockReturn
-    mocked?: boolean;
   };
 }
 

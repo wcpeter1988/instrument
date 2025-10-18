@@ -48,25 +48,14 @@ function buildTagContext(units: LogUnit[]) {
   return ctx;
 }
 
-// For backward compatibility, allow legacy expressions starting with 'payload.' which refer to current unit's payload
-function remapLegacy(expr: string, fallbackUnit?: LogUnit): string {
-  if (expr.startsWith('payload.') && fallbackUnit) {
-    return `${fallbackUnit.tagId}.${expr.substring('payload.'.length)}`;
-  }
-  return expr;
-}
 
 export async function evaluateMetric(metric: MetricConfig, allUnits: LogUnit[], llm: LLM = new MockLLM()): Promise<EvaluationResult> {
   const m = REGISTRY[metric.methodology as MethodologyType];
   if (!m) return { metric: metric.name, success: false, error: `Unknown methodology: ${metric.methodology}` };
   const tagCtx = buildTagContext(allUnits);
   const fallback = allUnits[0];
-  const remapped: Record<string, string> = {};
-  for (const [k, v] of Object.entries(metric.query || {})) {
-    remapped[k] = remapLegacy(v, fallback);
-  }
   const inputs: Record<string, any> = {};
-  for (const [k, expr] of Object.entries(remapped)) {
+  for (const [k, expr] of Object.entries(metric.query || {})) {
     inputs[k] = getByPath(tagCtx, expr);
   }
   try {

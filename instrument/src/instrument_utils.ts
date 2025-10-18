@@ -359,24 +359,8 @@ export function LogMethod(options: InstrumentOptions = {}) {
 						}
 						if (Object.keys(argMap).length) (payload as any).args = argMap;
 					if (options.includeThis) (payload as any).thisArg = toJSONish(this, options.redact ?? defaultRedact);
-					// Support mockReturn: short-circuit original implementation when provided.
-					let result: any;
-					let usedMock = false;
-					if (options.mockReturn !== undefined) {
-						usedMock = true;
-						if (typeof options.mockReturn === 'function') {
-							try {
-								result = (options.mockReturn as any)({ args, thisArg: this, label, original });
-							} catch (err) {
-								// If mock factory throws, treat as error path similar to original throwing
-								throw err;
-							}
-						} else {
-							result = options.mockReturn;
-						}
-					} else {
-						result = original.apply(this, args);
-					}
+					// mockReturn removed; always invoke original implementation. Use replay to override values.
+					let result: any = original.apply(this, args);
 					if (isPromiseLike(result)) {
 						return (result as Promise<any>)
 							.then((res) => {
@@ -397,7 +381,7 @@ export function LogMethod(options: InstrumentOptions = {}) {
 										error: (payload as any).error,
 										end: (payload as any).end,
 										durationMs: (payload as any).durationMs,
-										mocked: usedMock || undefined,
+										// mocked flag removed
 									},
 								};
 											unit = applyReplayIfAvailable(payload, unit);
@@ -444,7 +428,7 @@ export function LogMethod(options: InstrumentOptions = {}) {
 								error: (payload as any).error,
 								end: (payload as any).end,
 								durationMs: (payload as any).durationMs,
-								mocked: usedMock || undefined,
+										// mocked flag removed
 							},
 						};
 						unit = applyReplayIfAvailable(payload, unit);
@@ -583,24 +567,13 @@ export function logCall<T extends Function>(fn: T, options: InstrumentOptions = 
 			parts.push('this=' + safeStringify(this, redact));
 		}
 		logger(parts.join(' '));
-		let result: any;
-		let usedMock = false;
-		if (options.mockReturn !== undefined) {
-			usedMock = true;
-			if (typeof options.mockReturn === 'function') {
-				result = (options.mockReturn as any)({ args, thisArg: this, label: callLabel, original: fn });
-			} else {
-				result = options.mockReturn;
-			}
-		} else {
-			result = (fn as any).apply(this, args);
-		}
+		let result: any = (fn as any).apply(this, args);
 		if (result && typeof (result as any).then === 'function') {
 			return (result as any)
 				.then((res: any) => {
 					const shouldLogReturn = (options.logReturn ?? (options as any).return) !== false;
 					if (shouldLogReturn) {
-						logger(`[return] ${callLabel} -> ` + safeStringify(res, redact) + (usedMock ? ' [mocked]' : ''));
+						logger(`[return] ${callLabel} -> ` + safeStringify(res, redact));
 					}
 					return res;
 				})
@@ -611,7 +584,7 @@ export function logCall<T extends Function>(fn: T, options: InstrumentOptions = 
 		} else {
 			const shouldLogReturn = (options.logReturn ?? (options as any).return) !== false;
 			if (shouldLogReturn) {
-				logger(`[return] ${callLabel} -> ` + safeStringify(result, redact) + (usedMock ? ' [mocked]' : ''));
+				logger(`[return] ${callLabel} -> ` + safeStringify(result, redact));
 			}
 			return result;
 		}
@@ -718,22 +691,11 @@ export function instrument<T extends object | AnyFn>(
 			const { logger = console.log, redact = defaultRedact } = options;
 			logger(`[call] ${label}(` + formatArgs(args, redact) + ')' + (includeThis ? ' this=' + safeStringify(this, redact) : ''));
 			try {
-				let result: any;
-				let usedMock = false;
-				if (options.mockReturn !== undefined) {
-					usedMock = true;
-					if (typeof options.mockReturn === 'function') {
-						result = (options.mockReturn as any)({ args, thisArg: this, label, original: fn });
-					} else {
-						result = options.mockReturn;
-					}
-				} else {
-					result = fn.apply(this, args);
-				}
+				let result: any = fn.apply(this, args);
 				if (isPromiseLike(result)) {
 					return (result as Promise<any>)
 						.then((res) => {
-							logger(`[return] ${label} -> ` + safeStringify(res, redact) + (usedMock ? ' [mocked]' : ''));
+							logger(`[return] ${label} -> ` + safeStringify(res, redact));
 							return res;
 						})
 						.catch((err) => {
@@ -741,7 +703,7 @@ export function instrument<T extends object | AnyFn>(
 							throw err;
 						});
 				} else {
-					logger(`[return] ${label} -> ` + safeStringify(result, redact) + (usedMock ? ' [mocked]' : ''));
+					logger(`[return] ${label} -> ` + safeStringify(result, redact));
 					return result;
 				}
 			} catch (err: any) {

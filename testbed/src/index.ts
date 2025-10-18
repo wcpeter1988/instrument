@@ -39,7 +39,8 @@ async function main() {
         const sessionId = provided ? provided : `mock_session_${randomUUID()}`;
         const units = startInstrumentSession(project, sessionId, datalake_url);
         console.log('[session]', sessionId);
-        await runMockServiceDecorated('How to separate success and fail pipelines?');
+        const result = await runMockServiceDecorated('How to separate success and fail pipelines?');
+        console.log(`[result] ${JSON.stringify(result, null, 2)}`);
         endInstrumentSession();
 
         try {

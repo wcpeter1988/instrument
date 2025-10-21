@@ -34,8 +34,8 @@
     "methodology": "DAG",
     "promptTemplate": "Compare expected steps to actual plan steps. Expected: {{reference}} Actual: {{steps}} Return coverage",
     "query": {
-      "reference": "planGenerator.return",
-      "steps": "planGenerator.return"
+      "reference": "getMeetingInsight.return",
+      "steps": "fetchContext.return"
     },
     "params": {
       "threshold": 0.6

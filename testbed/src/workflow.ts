@@ -1,4 +1,4 @@
-import { InstrumentMethod, InstrumentVar } from '@workspace/instrument';
+import { InstrumentMethod, InstrumentVar, logVar, InstrumentType } from '@workspace/instrument';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -36,41 +36,41 @@ export interface IWorkflowStore {
 
 // Decorator-based variant (kept for context service only)
 export class DecoratedContextService {
-    @InstrumentMethod({ label: 'fetchContext', params: ['question'], return: true })
-    async fetchContext(question: string): Promise<string[]> {
-        await sleep(20);
-        return [
-            `Q:${question}`,
-            'doc: how to mock workflows',
-            'tip: use instrumentation to trace steps',
-        ];
-    }
+  @InstrumentMethod({ label: 'fetchContext', params: { question: InstrumentType.TraceAndReplay }, return: InstrumentType.Trace })
+  async fetchContext(question: string): Promise<string[]> {
+    await sleep(20);
+    return [
+      `Q:${question}`,
+      'doc: how to mock workflows',
+      'tip: use instrumentation to trace steps',
+    ];
+  }
 
-    @InstrumentMethod({ label: 'getMeetingInsight', params: ['transcript'], return: true })
-    public async getMeetingInsight(
-        client: IOpenAiChatClient,
-        transcript?: string,
-        workflowStore?: IWorkflowStore,
-        promptVersion?: string
-    ): Promise<string> {
-        const mockTranscript =
-            transcript ??
-            [
-                'Speaker A: Welcome everyone, today we review Q3 numbers and roadmap.',
-                'Speaker B: Revenue grew 12%, churn decreased 1.2%.',
-                'Speaker C: Top risks are hiring and infra costs.',
-                'Action Items: finalize budget, schedule hiring plan, optimize cloud spend.',
-            ].join('\n');
+  @InstrumentMethod({ label: 'getMeetingInsight', params: { transcript: InstrumentType.TraceAndReplay }, return: InstrumentType.Trace })
+  public async getMeetingInsight(
+    client: IOpenAiChatClient,
+    transcript?: string,
+    workflowStore?: IWorkflowStore,
+    promptVersion?: string
+  ): Promise<string> {
+    const mockTranscript =
+      transcript ??
+      [
+        'Speaker A: Welcome everyone, today we review Q3 numbers and roadmap.',
+        'Speaker B: Revenue grew 12%, churn decreased 1.2%.',
+        'Speaker C: Top risks are hiring and infra costs.',
+        'Action Items: finalize budget, schedule hiring plan, optimize cloud spend.',
+      ].join('\n');
 
-        const version = promptVersion ?? 'v1';
-        const prompt = `[meeting-summary ${version}]`
-        const fullPrompt = `${prompt}\n${mockTranscript}`;
-        InstrumentVar(prompt, 'prompt');
+    const version = promptVersion ?? 'v1';
+    let prompt = `[meeting-summary ${version} __]`;
+    logVar(prompt, 'prompt');
+    const fullPrompt = `${prompt}\n${mockTranscript}`;
 
-        const summary = await client.complete(fullPrompt, { stream: false });
-        await workflowStore?.save?.('meeting-summary', { version, length: mockTranscript.length });
-        return summary.trim();
-    }
+    const summary = await client.complete(fullPrompt, { stream: false });
+    await workflowStore?.save?.('meeting-summary', { version, length: mockTranscript.length });
+    return summary.trim();
+  }
 }
 
 export async function runMockServiceDecorated(question: string): Promise<string> {
@@ -91,7 +91,7 @@ export async function runMockServiceDecorated(question: string): Promise<string>
     async complete(prompt: string) {
       await sleep(10);
       // Return a mock meeting summary (concise) based on prompt length
-      return `Summary: Reviewed Q3, revenue up, churn down. Risks: hiring & infra. Actions: budget, hiring plan, optimize cloud.`;
+      return `Summary: Reviewed Q4, revenue up, churn down. Risks: hiring & infra. Actions: budget, hiring plan, optimize cloud.`;
     },
   };
 

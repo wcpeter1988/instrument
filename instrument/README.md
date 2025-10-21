@@ -1,14 +1,17 @@
 # @workspace/instrument
 
-Decorator-like logging utilities for TypeScript/JavaScript to log function parameters and return values.
+Decorator-like logging utilities for TypeScript/JavaScript to log and optionally replay function parameters and return values using fine-grained instrumentation modes.
 
 ## Features
 
 - Function wrapper `logCall(fn, options)`
-- Method decorator `@LogMethod()`
-- Class decorator `@LogAll()` to instrument all methods
-- Handles sync and async functions
-- Emits structured log units (LogUnit) with dictionary-based `payload.args` & `payload.vars` for direct name access (e.g. `args.userId`).
+- Method decorator `@LogMethod()` / alias `@InstrumentMethod`
+- Class decorator `@LogAll()` / alias `@InstrumentAll` to instrument all methods
+- Function wrapper `logCall()` and inline helpers `logInline`, `logVar`, `logVars`
+- Session capture + replay (override logged args/return/vars) via `startInstrumentSession` and `setInstrumentSessionReplay`
+- Fine-grained control per parameter and return value using `InstrumentType` enum
+- Handles sync, async, and promise-returning functions
+- Emits structured `LogUnit` objects with dictionary-based `payload.args` & `payload.vars` for direct name access
 
 ## Install
 
@@ -35,6 +38,45 @@ class Service {
 const s = new Service();
 s.greet('world');
 ```
+
+## Instrumentation Model
+
+Instrumentation now uses an enum to describe behavior per parameter and the return value:
+
+```ts
+export enum InstrumentType {
+  None = 'None',              // Do not log and not eligible for replay override
+  Trace = 'Trace',            // Log the value but do not allow replay override of execution result
+  TraceAndReplay = 'TraceAndReplay', // Log and allow replay to override pre-call args (affects execution) or post-call return
+}
+```
+
+Decorator usage example:
+
+```ts
+class Service {
+  @InstrumentMethod({
+    label: 'fetchContext',
+    params: { question: InstrumentType.TraceAndReplay }, // capture & allow replay overrides for `question`
+    return: InstrumentType.Trace                         // log return but do not override actual returned value
+  })
+  async fetchContext(question: string): Promise<string[]> { /* ... */ }
+}
+```
+
+Function wrapper example:
+
+```ts
+const add = (a: number, b: number) => a + b;
+const loggedAdd = logCall(add, {
+  label: 'add',
+  params: { a: InstrumentType.Trace, b: InstrumentType.Trace },
+  return: InstrumentType.Trace,
+});
+loggedAdd(1,2);
+```
+
+Return override via replay occurs only when `return: InstrumentType.TraceAndReplay` AND `replayOverrideReturn: true` is specified.
 
 ## LogUnit Structure
 
@@ -69,67 +111,25 @@ unit.payload.vars?.context?.value; // variable details
 
 ### Migration Notes
 
-Earlier versions stored `args` as an array of `{ name, value }` and `vars` as an array. Existing persisted data can be normalized externally by converting arrays to dictionaries keyed by `name || 'arg{index}'`. This package no longer emits the old array shape.
-
-## Mocking Return Values
-
-You can force instrumented calls to return a fixed (or computed) value without invoking the original implementation using the `mockReturn` option. This works uniformly across `logCall`, `@LogMethod`, `@LogAll`, and `instrument()`.
-
-### Static Mock
+Previous versions used `logArgs`, `logReturn`, and boolean `return` flags plus array/selector forms (`params: ['a','b'] | 'all' | 'none'`). All of these have been replaced by the `InstrumentType` map:
 
 ```ts
-import { logCall } from '@workspace/instrument';
+// Old
+@InstrumentMethod({ params: ['a','b'], return: true })
 
-const realAdd = (a: number, b: number) => { throw new Error('Should not run'); };
-const mockedAdd = logCall(realAdd, { label: 'add', mockReturn: 42, logReturn: true });
-mockedAdd(1, 2); // returns 42
+// New
+@InstrumentMethod({ params: { a: InstrumentType.Trace, b: InstrumentType.Trace }, return: InstrumentType.Trace })
 ```
 
-### Factory Function Mock
+Any parameter omitted from the `params` map defaults to `InstrumentType.None` (not logged). To enable replay override for a parameter, use `TraceAndReplay`.
 
-Provide a factory to generate the mocked value based on args/this/label/original.
+The former array shapes for `args` / `vars` in emitted units were removed in favor of dictionaries.
 
-```ts
-class Api {
-  @LogMethod({ mockReturn: ({ args }) => ({ status: 'fake', sum: args[0] + args[1] }), logReturn: true })
-  compute(x: number, y: number) { return x + y; } // original never called
-}
-```
+## Return Value Replay vs Logging
 
-### Type Signature
+Return value logging is controlled by `return: InstrumentType.Trace` or `TraceAndReplay`. Only the `TraceAndReplay` mode combined with `replayOverrideReturn: true` will substitute the actual returned value from the call site with the replay return.
 
-```ts
-mockReturn?: any | ((ctx: { args: any[]; thisArg: any; label: string; original: Function }) => any | Promise<any>);
-```
-
-- If `mockReturn` is defined, the original function/method body is skipped.
-- If the factory returns a Promise, it's awaited transparently.
-- The logged `payload.return` (when `logReturn: true`) contains the mocked value.
-- A `payload.mocked: true` flag is added to emitted `LogUnit` objects for decorated methods (and other instrumentation forms) to indicate the result was mocked.
-
-### Use Cases
-
-- Deterministic testing without hitting real implementations
-- Stubbing expensive or side-effectful methods while still collecting timing + arg logs
-- Feature flagging / partial rollouts by conditionally supplying `mockReturn` at runtime
-
-### Conditional Mocking
-
-You can decide at runtime whether to mock by returning the real implementation conditionally in your factory:
-
-```ts
-@LogMethod({
-  mockReturn: ({ args, original }) => {
-    const [mode] = args;
-    if (mode === 'real') return original(...args); // fall through to real logic
-    return { mode, mocked: true };
-  },
-  logReturn: true,
-})
-run(mode: string) { return { mode, mocked: false }; }
-```
-
-Note: If you intentionally call `original(...args)` inside the factory, that invocation won't be double-instrumented; you're manually delegating.
+If `replayOverrideReturn: false`, replay return values are still recorded in the emitted `LogUnit.payload.return` (with `replayed: true`) but the original function's actual returned value is preserved.
 
 ## Session Replay (Override Logged Values)
 
@@ -137,7 +137,7 @@ You can override the logged argument/variable/return data for a session using pr
 
 ### How It Works
 
-1. Start a session: `startInstrumentSession(project, sessionId)`.
+1. Start a session: `await startInstrumentSession(project, sessionId)` (async: waits for any auto-replay preload).
 2. Call `setInstrumentSessionReplay(units)` providing an array of historical `LogUnit` objects.
 3. For each emitted unit during this session, if a replay unit exists for the same `tagId`, the logged `payload.args`, `payload.vars`, and `payload.return` are replaced by values from the replay unit (sequentially if multiple).
 4. The actual function/method still executes; its real return value is not changed (only the logged one). A flag `payload.replayed: true` is added.
@@ -168,7 +168,7 @@ s.compute(5, 7);     // real return 12; logged args/return show second replay (a
 
 ### Inspecting Units
 
-Replay-modified units include:
+Replay-modified units include the flag:
 
 ```ts
 unit.payload.replayed === true;
@@ -183,14 +183,14 @@ unit.payload.replayed === true;
 
 ### Auto Replay on Session Start
 
-`startInstrumentSession(project, sessionId, endpoint, autoReplay=true)` will attempt a non-blocking fetch of existing data for that project/session (if an `endpoint` is provided) and automatically enable replay with any retrieved units. Disable by passing `autoReplay=false`.
+`await startInstrumentSession(project, sessionId, endpoint, autoReplay=true)` will fetch (awaited) existing data for that project/session (if an `endpoint` is provided) and automatically enable replay with any retrieved units. Disable by passing `autoReplay=false`.
 
 ```ts
-// Auto replay enabled (default): existing units pulled from datalake
-startInstrumentSession('proj', 'sess-123', 'http://localhost:3300', true);
+// Auto replay enabled (default): existing units pulled from datalake (await required)
+await startInstrumentSession('proj', 'sess-123', 'http://localhost:3300', true);
 
 // Disable auto replay
-startInstrumentSession('proj', 'sess-123', 'http://localhost:3300', false);
+await startInstrumentSession('proj', 'sess-123', 'http://localhost:3300', false);
 
 // Clear replay state manually
 clearInstrumentSessionReplay();

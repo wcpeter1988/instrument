@@ -469,17 +469,32 @@
       tree.appendChild(ul);
       out.appendChild(tree);
       // Generation controls appended below tree
-      const controls = document.createElement('div');
-      controls.style.marginTop = '12px';
-      genBtn = document.createElement('button');
-      genBtn.textContent = 'Generate Config';
-      genBtn.disabled = true;
-      genStatus = document.createElement('span');
-      genStatus.className = 'status muted';
-      genStatus.style.marginLeft = '8px';
-      controls.appendChild(genBtn);
-      controls.appendChild(genStatus);
-      out.appendChild(controls);
+  const controlsWrap = document.createElement('div');
+  controlsWrap.style.marginTop = '12px';
+  // hidden container toggled by selection
+  controlsWrap.style.display = 'none';
+  const controls = document.createElement('div');
+  controls.style.display = 'flex';
+  controls.style.alignItems = 'center';
+  controls.style.gap = '8px';
+  // Prompt input for generation
+  const promptInput = document.createElement('input');
+  promptInput.type = 'text';
+  promptInput.placeholder = 'Optional prompt...';
+  promptInput.style.flex = '1';
+  promptInput.id = 'gen-prompt';
+  promptInput.autocomplete = 'off';
+  genBtn = document.createElement('button');
+  genBtn.textContent = 'Generate Config';
+  genBtn.disabled = false; // enabled while visible; selection controls gating visibility
+  genStatus = document.createElement('span');
+  genStatus.className = 'status muted';
+  genStatus.style.marginLeft = '4px';
+  controls.appendChild(promptInput);
+  controls.appendChild(genBtn);
+  controls.appendChild(genStatus);
+  controlsWrap.appendChild(controls);
+  out.appendChild(controlsWrap);
       genBtn.addEventListener('click', async () => {
         const project = projectInput.value.trim();
         if (!project) { alert('Enter project'); return; }
@@ -489,7 +504,7 @@
         try {
           const res = await fetch('/api/gen', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ project, sessions: Array.from(selected) })
+            body: JSON.stringify({ project, sessions: Array.from(selected), prompt: promptInput.value.trim() || undefined })
           });
           if (!res.ok) {
             genStatus.textContent = 'Generation failed';
@@ -509,8 +524,14 @@
         }
       });
       function updateGenControls(sel) {
-        genBtn.disabled = sel.size === 0;
-        genStatus.textContent = sel.size ? '' : '';
+        // Show wrap only if at least one session selected
+        if (sel.size > 0) {
+          controlsWrap.style.display = 'block';
+          genStatus.textContent = '';
+        } else {
+          controlsWrap.style.display = 'none';
+          genStatus.textContent = '';
+        }
       }
     }
 

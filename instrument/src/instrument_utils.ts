@@ -5,7 +5,8 @@ import path from 'path';
 import fs from 'fs';
 
 // Import types only to avoid runtime circular dependency with index.ts
-import type { InstrumentOptions } from './index';
+import { InstrumentType } from './index';
+import type { InstrumentOptions, ParamInstrumentationMap } from './index';
 import type { LogUnit } from '@workspace/common';
 
 // Helper: safe JSON stringify with optional redaction
@@ -89,9 +90,9 @@ export interface InstrumentSession {
 	project: string;
 	sessionId: string;
 	endpoint?: string; // optional datalake endpoint to POST log units
-  // Optional in-memory sink/collection for current session
-  sink?: (unit: LogUnit) => void;
-  units?: LogUnit[];
+	// Optional in-memory sink/collection for current session
+	sink?: (unit: LogUnit) => void;
+	units?: LogUnit[];
 	// Optional replay data: map tagId -> array of units to replay
 	replay?: Record<string, LogUnit[]>;
 	// Internal counters to track position in replay arrays
@@ -102,7 +103,7 @@ const sessionStore = new AsyncLocalStorage<InstrumentSession | undefined>();
 
 // Start a session and automatically attach an in-memory collector. Returns the live units array.
 // Backward compatibility: previous return was a disposer fn; now we return units[] while endInstrumentSession disposes.
-export function startInstrumentSession(project: string, sessionId: string, endpoint?: string, autoReplay: boolean = true): LogUnit[] {
+export async function startInstrumentSession(project: string, sessionId: string, endpoint?: string, autoReplay: boolean = true): Promise<LogUnit[]> {
 	// Normalize endpoint: allow passing base service URL (http://host:port) or full /api/data path.
 	let ep = endpoint;
 	if (ep) {
@@ -127,62 +128,66 @@ export function startInstrumentSession(project: string, sessionId: string, endpo
 		sess.units = units;
 	}
 
-	// Attempt auto replay retrieval (non-blocking)
+	// Attempt auto replay retrieval (now awaited) and preload existing units for this session
 	if (autoReplay && sess.endpoint) {
 		try {
 			const url = new URL(sess.endpoint);
-			// Replace /api/data with query variant
 			const base = sess.endpoint.replace(/\/api\/data$/, '');
 			const getUrl = `${base}/api/data?project=${encodeURIComponent(project)}&session=${encodeURIComponent(sessionId)}`;
 			const isHttps = url.protocol === 'https:';
 			const client = isHttps ? https : http;
-			const req = client.get(getUrl, (res) => {
-				let data = '';
-				res.on('data', (chunk) => (data += chunk));
-				res.on('end', () => {
-					try {
-						const json = JSON.parse(data);
-						if (json && json.data && typeof json.data === 'object') {
-							const collected: LogUnit[] = [];
-							// Traverse nested structure session>tagid>description
-							const sessionsObj = json.data;
-							for (const sessKey of Object.keys(sessionsObj)) {
-								const tagMap = sessionsObj[sessKey];
-								for (const tagId of Object.keys(tagMap)) {
-									const descMap = tagMap[tagId];
-									for (const desc of Object.keys(descMap)) {
-										for (const item of descMap[desc]) {
-											if (!item || typeof item !== 'object') continue;
-											collected.push({
-												tagId: item.tagid || tagId,
-												timestamp: typeof item.timestamp === 'number' ? item.timestamp : Date.now(),
-												session: item.session,
-												project: item.project,
-												payload: item.payload || {},
-											});
-										}
-									}
+			const data: string = await new Promise((resolve, reject) => {
+				try {
+					const req = client.get(getUrl, (res) => {
+						let body = '';
+						res.on('data', (chunk) => (body += chunk));
+						res.on('end', () => resolve(body));
+					});
+					req.on('error', (err) => reject(err));
+				} catch (e) {
+					reject(e);
+				}
+			});
+			try {
+				const json = JSON.parse(data);
+				if (json && json.data && typeof json.data === 'object') {
+					const collected: LogUnit[] = [];
+					const sessionsObj = json.data; // session -> tagId -> description -> items[]
+					for (const sessKey of Object.keys(sessionsObj)) {
+						const tagMap = sessionsObj[sessKey];
+						for (const tagId of Object.keys(tagMap)) {
+							const descMap = tagMap[tagId];
+							for (const desc of Object.keys(descMap)) {
+								for (const item of descMap[desc]) {
+									if (!item || typeof item !== 'object') continue;
+									collected.push({
+										tagId: item.tagid || tagId,
+										timestamp: typeof item.timestamp === 'number' ? item.timestamp : Date.now(),
+										session: item.session,
+										project: item.project,
+										payload: { ...(item.payload || {}), preloaded: true },
+									});
 								}
 							}
-							if (collected.length) {
-								setInstrumentSessionReplay(collected);
-								// eslint-disable-next-line no-console
-								console.log('[instrument][replay-load]', {
-									project,
-									sessionId,
-									units: collected.length,
-									tagIds: Object.keys(sess.replay || {})
-								});
-							}
 						}
-					} catch {
-						/* swallow */
 					}
-				});
-			});
-			req.on('error', () => {});
-		} catch {
-			// ignore fetch errors
+					if (collected.length) {
+						setInstrumentSessionReplay(collected);
+						for (const u of collected) sess.units!.push(u);
+						console.log('[instrument][replay-load]', {
+							project,
+							sessionId,
+							units: collected.length,
+							tagIds: Object.keys(sess.replay || {})
+						});
+						console.log('[instrument][preloaded-existing]', { project, sessionId, preloaded: collected.length });
+					}
+				}
+			} catch {
+				// swallow parse errors
+			}
+		} catch (e) {
+			console.error('[instrument][replay-load-fail]', { project, sessionId, error: (e as any)?.message || e });
 		}
 	}
 	return sess.units!;
@@ -206,8 +211,15 @@ export function setInstrumentSessionReplay(units: LogUnit[]) {
 	if (!sess) throw new Error('setInstrumentSessionReplay must be called within an active instrument session');
 	const byTag: Record<string, LogUnit[]> = {};
 	for (const u of units) {
+		// Primary key
 		if (!byTag[u.tagId]) byTag[u.tagId] = [];
 		byTag[u.tagId].push(u);
+		// Provide alias: last segment after dot if different (e.g., Service.fetchContext -> fetchContext)
+		const lastSeg = u.tagId.includes('.') ? u.tagId.split('.').pop()! : undefined;
+		if (lastSeg && lastSeg !== u.tagId) {
+			if (!byTag[lastSeg]) byTag[lastSeg] = [];
+			byTag[lastSeg].push(u);
+		}
 	}
 	sess.replay = byTag;
 	sess.replayCursor = {};
@@ -220,15 +232,23 @@ export function clearInstrumentSessionReplay() {
 	delete sess.replayCursor;
 }
 
-function applyReplayIfAvailable(payload: LogPayload, originalUnit: LogUnit): LogUnit {
+interface ReplayResult { unit: LogUnit; overrideReturn?: any; overrideArgs?: any[] }
+function applyReplayIfAvailable(payload: LogPayload, originalUnit: LogUnit, callArgs?: any[]): ReplayResult {
 	const sess = getInstrumentSession();
-	if (!sess?.replay) return originalUnit;
-	const list = sess.replay[payload.label];
-	if (!list || list.length === 0) return originalUnit;
+	if (!sess?.replay) return { unit: originalUnit };
+	let list = sess.replay[payload.label];
+	if ((!list || list.length === 0) && payload.label.includes('.')) {
+		const lastSeg = payload.label.split('.').pop()!;
+		list = sess.replay[lastSeg];
+	}
+	if ((!list || list.length === 0) && payload.label.includes('@')) {
+		const base = payload.label.split('@')[0];
+		list = sess.replay[base] || sess.replay[base.split('.').pop()!];
+	}
+	if (!list || list.length === 0) return { unit: originalUnit };
 	const cursor = sess.replayCursor![payload.label] || 0;
 	const replayUnit = list[Math.min(cursor, list.length - 1)];
 	sess.replayCursor![payload.label] = cursor + 1;
-	// Override args/vars/return from replayUnit.payload
 	const merged: LogUnit = {
 		...originalUnit,
 		payload: {
@@ -239,6 +259,22 @@ function applyReplayIfAvailable(payload: LogPayload, originalUnit: LogUnit): Log
 			replayed: true,
 		},
 	};
+	// If we have a replay return value, surface it so caller can override actual function return
+	const overrideReturn = replayUnit.payload.return;
+	// Provide overrideArgs (raw values) if replay supplied args and original call had arg names map
+	let overrideArgs: any[] | undefined;
+	if (replayUnit.payload.args && callArgs && callArgs.length) {
+		// Attempt to rebuild ordered arg list from provided names in originalUnit.payload.args
+		const argMap = replayUnit.payload.args as Record<string, any>;
+		const ordered: any[] = [];
+		for (let i = 0; i < callArgs.length; i++) {
+			// Try by recorded param name or fallback to original arg
+			const names = Object.keys(argMap);
+			const byIndexName = names[i];
+			ordered[i] = (byIndexName && argMap[byIndexName] !== undefined) ? argMap[byIndexName] : callArgs[i];
+		}
+		overrideArgs = ordered;
+	}
 	// eslint-disable-next-line no-console
 	console.log('[instrument][replay-override]', {
 		label: payload.label,
@@ -248,7 +284,7 @@ function applyReplayIfAvailable(payload: LogPayload, originalUnit: LogUnit): Log
 		originalTimestamp: originalUnit.timestamp,
 		replayTimestamp: replayUnit.timestamp,
 	});
-	return merged;
+	return { unit: merged, overrideReturn, overrideArgs };
 }
 
 // Create a sink that posts LogUnits to a datalake-compatible endpoint.
@@ -282,7 +318,7 @@ export function endpointSink(endpoint: string | undefined) {
 				},
 				(res) => {
 					// consume to free socket
-					res.on('data', () => {});
+					res.on('data', () => { });
 					if (res.statusCode && res.statusCode >= 400) {
 						// eslint-disable-next-line no-console
 						console.warn('[instrument-upload-fail]', res.statusCode, endpoint);
@@ -319,53 +355,65 @@ export function LogMethod(options: InstrumentOptions = {}) {
 			return callContext.run(ctx, () => {
 				try {
 					const names = getParamNames(original) || [];
-					const argMap: Record<string, any> = {};
-					if (options.logArgs !== false) {
-						let selectedList: Array<string | number> | 'all' | 'none' | undefined = undefined;
-						if (typeof options.params === 'function') {
-							try {
-								selectedList = options.params({ names, args, thisArg: this, label });
-							} catch {
-								selectedList = 'none';
-							}
-						} else if (Array.isArray(options.params)) {
-							selectedList = options.params as Array<string | number>;
-						} else if (options.params === 'all' || options.params === 'none') {
-							selectedList = options.params as 'all' | 'none';
-						} else {
-							selectedList = 'none';
+					// Pre-call argument override using replay args (does not advance cursor; consumption happens post-call)
+					if (sess?.replay) {
+						let list = sess.replay[label] || (label.includes('.') ? sess.replay[label.split('.').pop()!] : undefined);
+						if ((!list || list.length === 0) && label.includes('@')) {
+							const base = label.split('@')[0];
+							list = sess.replay[base] || (base.includes('.') ? sess.replay[base.split('.').pop()!] : undefined);
 						}
-						if (selectedList && selectedList !== 'all' && selectedList !== 'none' && selectedList.length > 0) {
-							for (const p of selectedList) {
-								if (typeof p === 'number') {
-									const idx = p;
-									if (idx >= 0 && idx < args.length) {
-										const key = names[idx] || `arg${idx}`;
-										argMap[key] = toJSONish(args[idx], options.redact ?? defaultRedact);
+						if (list && list.length) {
+							const cursor = sess.replayCursor?.[label] || 0; // peek without increment
+							const replayUnit = list[Math.min(cursor, list.length - 1)];
+							const replayArgsMap = replayUnit.payload?.args as Record<string, any> | undefined;
+							if (replayArgsMap) {
+								// Attempt name-based override first; fall back to index-based arg{index} keys.
+								for (let i = 0; i < args.length; i++) {
+									const nameKey = names[i];
+									const indexKey = `arg${i}`;
+									if (nameKey && replayArgsMap[nameKey] !== undefined) {
+										args[i] = replayArgsMap[nameKey];
+										continue;
 									}
-								} else if (typeof p === 'string') {
-									const idx = names.indexOf(p);
-									if (idx >= 0 && idx < args.length) {
-										argMap[p] = toJSONish(args[idx], options.redact ?? defaultRedact);
+									if (replayArgsMap[indexKey] !== undefined) {
+										args[i] = replayArgsMap[indexKey];
 									}
 								}
 							}
-						} else if (selectedList === 'all') {
-							for (let i = 0; i < args.length; i++) {
-								const key = names[i] || `arg${i}`;
-								argMap[key] = toJSONish(args[i], options.redact ?? defaultRedact);
+						}
+					}
+					// New param instrumentation map handling
+					const argMap: Record<string, any> = {};
+					let paramMap: ParamInstrumentationMap = {};
+					if (options.params) {
+						if (typeof options.params === 'function') {
+							try {
+								paramMap = options.params({ names, args, thisArg: this, label }) || {};
+							} catch {
+								paramMap = {};
 							}
+						} else {
+							paramMap = options.params as ParamInstrumentationMap;
 						}
+					}
+					for (let i = 0; i < args.length; i++) {
+						const key = names[i] || `arg${i}`;
+						const mode = paramMap[key] ?? InstrumentType.None;
+						if (mode === InstrumentType.Trace || mode === InstrumentType.TraceAndReplay) {
+							argMap[key] = toJSONish(args[i], options.redact ?? defaultRedact);
 						}
-						if (Object.keys(argMap).length) (payload as any).args = argMap;
+					}
+					if (Object.keys(argMap).length) (payload as any).args = argMap;
 					if (options.includeThis) (payload as any).thisArg = toJSONish(this, options.redact ?? defaultRedact);
 					// mockReturn removed; always invoke original implementation. Use replay to override values.
 					let result: any = original.apply(this, args);
 					if (isPromiseLike(result)) {
 						return (result as Promise<any>)
 							.then((res) => {
-								const shouldLogReturn = (options.logReturn ?? (options as any).return ?? false) === true;
-								if (shouldLogReturn) (payload as any).return = toJSONish(res, options.redact ?? defaultRedact);
+								const returnMode = options.return ?? InstrumentType.None;
+								if (returnMode === InstrumentType.Trace || returnMode === InstrumentType.TraceAndReplay) {
+									(payload as any).return = toJSONish(res, options.redact ?? defaultRedact);
+								}
 								(payload as any).end = Date.now();
 								(payload as any).durationMs = (payload as any).end - start;
 								let unit: LogUnit = {
@@ -384,9 +432,11 @@ export function LogMethod(options: InstrumentOptions = {}) {
 										// mocked flag removed
 									},
 								};
-											unit = applyReplayIfAvailable(payload, unit);
+								const rr = applyReplayIfAvailable(payload, unit, args);
+								unit = rr.unit;
 								sink(unit);
-								return res;
+								const shouldOverride = (options.return === InstrumentType.TraceAndReplay) && options.replayOverrideReturn && rr.overrideReturn !== undefined;
+								return shouldOverride ? rr.overrideReturn : res;
 							})
 							.catch((err) => {
 								(payload as any).error = (err as any)?.stack || String(err);
@@ -411,8 +461,10 @@ export function LogMethod(options: InstrumentOptions = {}) {
 								throw err;
 							});
 					} else {
-						const shouldLogReturn = (options.logReturn ?? (options as any).return ?? false) === true;
-						if (shouldLogReturn) (payload as any).return = toJSONish(result, options.redact ?? defaultRedact);
+						const returnMode = options.return ?? InstrumentType.None;
+						if (returnMode === InstrumentType.Trace || returnMode === InstrumentType.TraceAndReplay) {
+							(payload as any).return = toJSONish(result, options.redact ?? defaultRedact);
+						}
 						(payload as any).end = Date.now();
 						(payload as any).durationMs = (payload as any).end - start;
 						let unit: LogUnit = {
@@ -421,19 +473,21 @@ export function LogMethod(options: InstrumentOptions = {}) {
 							session: (payload as any).sessionId,
 							project: (payload as any).project,
 							payload: {
-									args: (payload as any).args,
+								args: (payload as any).args,
 								thisArg: (payload as any).thisArg,
 								vars: (payload as any).vars,
 								return: (payload as any).return,
 								error: (payload as any).error,
 								end: (payload as any).end,
 								durationMs: (payload as any).durationMs,
-										// mocked flag removed
+								// mocked flag removed
 							},
 						};
-						unit = applyReplayIfAvailable(payload, unit);
+						const rr = applyReplayIfAvailable(payload, unit, args);
+						unit = rr.unit;
 						sink(unit);
-						return result;
+						const shouldOverrideSync = (options.return === InstrumentType.TraceAndReplay) && options.replayOverrideReturn && rr.overrideReturn !== undefined;
+						return shouldOverrideSync ? rr.overrideReturn : result;
 					}
 				} catch (err: any) {
 					(payload as any).error = err?.stack || String(err);
@@ -445,7 +499,7 @@ export function LogMethod(options: InstrumentOptions = {}) {
 						session: (payload as any).sessionId,
 						project: (payload as any).project,
 						payload: {
-								args: (payload as any).args,
+							args: (payload as any).args,
 							thisArg: (payload as any).thisArg,
 							vars: (payload as any).vars,
 							return: (payload as any).return,
@@ -454,7 +508,8 @@ export function LogMethod(options: InstrumentOptions = {}) {
 							durationMs: (payload as any).durationMs,
 						},
 					};
-					unit = applyReplayIfAvailable(payload, unit);
+					const rr = applyReplayIfAvailable(payload, unit, args);
+					unit = rr.unit;
 					sink(unit);
 					throw err;
 				}
@@ -472,7 +527,7 @@ export function attachSessionCollector(_forwardToEndpoint = true): LogUnit[] {
 }
 
 export function LogAll(options: InstrumentOptions = {}) {
-	return function <T extends { new (...args: any[]): any }>(constructor: T) {
+	return function <T extends { new(...args: any[]): any }>(constructor: T) {
 		const propNames = Object.getOwnPropertyNames(constructor.prototype);
 		for (const name of propNames) {
 			if (name === 'constructor') continue;
@@ -496,32 +551,28 @@ export function pickArgs(
 	options: InstrumentOptions,
 	redact: InstrumentOptions['redact']
 ) {
-	const { logArgs = true, params } = options;
-	if (!logArgs) return '[]';
 	const names = getParamNames(fn) || [];
-	let selectedList: Array<string | number> | 'all' | 'none' | undefined = undefined;
-	if (typeof params === 'function') {
-		try {
-			selectedList = params({ names, args: allArgs, thisArg: undefined, label: options.label || (fn.name || 'anonymous') });
-		} catch {
-			selectedList = 'all';
-		}
-	} else {
-		selectedList = params;
-	}
-	if (!selectedList || (Array.isArray(selectedList) && selectedList.length === 0)) return formatArgs(allArgs, redact);
-	if (selectedList === 'none') return '[]';
-	if (selectedList === 'all') return formatArgs(allArgs, redact);
-	const selected: any[] = [];
-	for (const p of selectedList) {
-		if (typeof p === 'number') {
-			if (p >= 0 && p < allArgs.length) selected.push(allArgs[p]);
-		} else if (typeof p === 'string') {
-			const idx = names.indexOf(p);
-			if (idx >= 0 && idx < allArgs.length) selected.push(allArgs[idx]);
+	let paramMap: ParamInstrumentationMap = {};
+	if (options.params) {
+		if (typeof options.params === 'function') {
+			try {
+				paramMap = options.params({ names, args: allArgs, thisArg: undefined, label: options.label || (fn.name || 'anonymous') }) || {};
+			} catch {
+				paramMap = {};
+			}
+		} else {
+			paramMap = options.params as ParamInstrumentationMap;
 		}
 	}
-	return formatArgs(selected, redact);
+	const collected: any[] = [];
+	for (let i = 0; i < allArgs.length; i++) {
+		const key = names[i] || `arg${i}`;
+		const mode = paramMap[key] ?? InstrumentType.None;
+		if (mode === InstrumentType.Trace || mode === InstrumentType.TraceAndReplay) {
+			collected.push(allArgs[i]);
+		}
+	}
+	return safeStringify(collected, redact);
 }
 
 export function selectArgs(
@@ -529,29 +580,25 @@ export function selectArgs(
 	fn: Function,
 	options: InstrumentOptions
 ) {
-	const { logArgs = true, params } = options;
-	if (!logArgs) return [] as any[];
 	const names = getParamNames(fn) || [];
-	let selectedList: Array<string | number> | 'all' | 'none' | undefined = undefined;
-	if (typeof params === 'function') {
-		try {
-			selectedList = params({ names, args: allArgs, thisArg: undefined, label: options.label || (fn.name || 'anonymous') });
-		} catch {
-			selectedList = 'all';
+	let paramMap: ParamInstrumentationMap = {};
+	if (options.params) {
+		if (typeof options.params === 'function') {
+			try {
+				paramMap = options.params({ names, args: allArgs, thisArg: undefined, label: options.label || (fn.name || 'anonymous') }) || {};
+			} catch {
+				paramMap = {};
+			}
+		} else {
+			paramMap = options.params as ParamInstrumentationMap;
 		}
-	} else {
-		selectedList = params;
 	}
-	if (!selectedList || (Array.isArray(selectedList) && selectedList.length === 0)) return Array.from(allArgs);
-	if (selectedList === 'none') return [] as any[];
-	if (selectedList === 'all') return Array.from(allArgs);
 	const selected: any[] = [];
-	for (const p of selectedList) {
-		if (typeof p === 'number') {
-			if (p >= 0 && p < allArgs.length) selected.push(allArgs[p]);
-		} else if (typeof p === 'string') {
-			const idx = names.indexOf(p);
-			if (idx >= 0 && idx < allArgs.length) selected.push(allArgs[idx]);
+	for (let i = 0; i < allArgs.length; i++) {
+		const key = names[i] || `arg${i}`;
+		const mode = paramMap[key] ?? InstrumentType.None;
+		if (mode === InstrumentType.Trace || mode === InstrumentType.TraceAndReplay) {
+			selected.push(allArgs[i]);
 		}
 	}
 	return selected;
@@ -559,34 +606,43 @@ export function selectArgs(
 
 export function logCall<T extends Function>(fn: T, options: InstrumentOptions = {}): T {
 	const { logger = console.log, label = fn.name || 'anonymous', includeThis = false, redact = defaultRedact } = options;
-	const wrapped: any = function (this: any, ...args: any[]) {
+	const wrapped: any = function (this: any, ...callArgs: any[]) {
 		const callLabel = label;
 		const parts: any[] = [];
-		parts.push(`[call] ${callLabel}(` + pickArgs(args, fn, options, redact) + ')');
+		parts.push(`[call] ${callLabel}(` + pickArgs(callArgs, fn, options, redact) + ')');
 		if (includeThis) {
 			parts.push('this=' + safeStringify(this, redact));
 		}
 		logger(parts.join(' '));
-		let result: any = (fn as any).apply(this, args);
+		let result: any = (fn as any).apply(this, callArgs);
+		const applyOverride = (res: any): any => {
+			const returnMode = options.return ?? InstrumentType.None;
+			if (returnMode === InstrumentType.Trace || returnMode === InstrumentType.TraceAndReplay) {
+				logger(`[return] ${callLabel} -> ` + safeStringify(res, redact));
+			}
+			return res;
+		};
 		if (result && typeof (result as any).then === 'function') {
 			return (result as any)
-				.then((res: any) => {
-					const shouldLogReturn = (options.logReturn ?? (options as any).return) !== false;
-					if (shouldLogReturn) {
-						logger(`[return] ${callLabel} -> ` + safeStringify(res, redact));
-					}
-					return res;
+				.then((orig: any) => {
+					const payload: LogPayload = { label: callLabel, start: Date.now(), project: getInstrumentSession()?.project, sessionId: getInstrumentSession()?.sessionId } as any;
+					let unit: LogUnit = { tagId: callLabel, timestamp: payload.start, session: payload.sessionId, project: payload.project, payload: {} };
+					const rr = applyReplayIfAvailable(payload, unit, callArgs);
+					const shouldOverride = (options.return === InstrumentType.TraceAndReplay) && options.replayOverrideReturn && rr.overrideReturn !== undefined;
+					const actual = shouldOverride ? rr.overrideReturn : orig;
+					return applyOverride(actual);
 				})
 				.catch((err: any) => {
 					logger(`[throw] ${callLabel} !! ` + (err?.stack || String(err)));
 					throw err;
 				});
 		} else {
-			const shouldLogReturn = (options.logReturn ?? (options as any).return) !== false;
-			if (shouldLogReturn) {
-				logger(`[return] ${callLabel} -> ` + safeStringify(result, redact));
-			}
-			return result;
+			const payload: LogPayload = { label: callLabel, start: Date.now(), project: getInstrumentSession()?.project, sessionId: getInstrumentSession()?.sessionId } as any;
+			let unit: LogUnit = { tagId: callLabel, timestamp: payload.start, session: payload.sessionId, project: payload.project, payload: {} };
+			const rr = applyReplayIfAvailable(payload, unit, callArgs);
+			const shouldOverride = (options.return === InstrumentType.TraceAndReplay) && options.replayOverrideReturn && rr.overrideReturn !== undefined;
+			const actual = shouldOverride ? rr.overrideReturn : result;
+			return applyOverride(actual);
 		}
 	};
 	Object.defineProperty(wrapped, 'name', { value: (fn as any).name, configurable: true });
@@ -600,9 +656,7 @@ export function deriveCallsiteLabel(fallback: string) {
 	const frame = stack.find((l) => !/instrument[\\/].*index\.ts/.test(l) && !/node_modules/.test(l) && !/internal\//.test(l));
 	if (!frame) return fallback;
 	const m = frame.match(/\(?([^()]+):(\d+):(\d+)\)?/);
-	if (!m) return fallback;
-	const [, file, line, col] = m;
-	return `${fallback}@${file}:${line}:${col}`;
+	return fallback;
 }
 
 export function getCallsite() {
@@ -659,8 +713,27 @@ export function logVar<T>(value: T, name?: string, options: InstrumentOptions = 
 		const inferred = (!name && cs) ? tryInferVarNameFromSource(cs) : undefined;
 		const varName = name || inferred || 'var';
 		const at = `${varName}@${rel}${cs ? `:${cs.line}:${cs.col}` : ''}`;
-		payload.vars[varName] = { value: toJSONish(value, opt.redact ?? defaultRedact), at };
-		return value;
+		// Check replay for this label to override variable value
+		const sess = getInstrumentSession();
+		let replayValue: any = undefined;
+		if (sess?.replay && payload.label) {
+			let list = sess.replay[payload.label] || (payload.label.includes('.') ? sess.replay[payload.label.split('.').pop()!] : undefined);
+			if ((!list || list.length === 0) && payload.label.includes('@')) {
+				const base = payload.label.split('@')[0];
+				list = sess.replay[base] || (base.includes('.') ? sess.replay[base.split('.').pop()!] : undefined);
+			}
+			if (list && list.length) {
+				const cursor = sess.replayCursor?.[payload.label] || 0;
+				const replayUnit = list[Math.min(cursor, list.length - 1)];
+				const varsOverride = replayUnit.payload?.vars as any;
+				if (varsOverride && varsOverride[varName]?.value !== undefined) {
+					replayValue = varsOverride[varName].value;
+				}
+			}
+		}
+		const finalVal = replayValue !== undefined ? replayValue : value;
+		payload.vars[varName] = { value: toJSONish(finalVal, opt.redact ?? defaultRedact), at };
+		return finalVal;
 	}
 	const { logger = console.log, redact = defaultRedact } = options;
 	const base = options.label ?? (name || 'var');

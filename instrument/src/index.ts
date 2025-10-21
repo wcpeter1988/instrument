@@ -4,18 +4,29 @@ export type ParamsSelector = (info: { names: string[]; args: any[]; thisArg: any
 
 import type { LogUnit, MetricConfig, EvaluationResult, MethodologyType } from '@workspace/common';
 
+// New enum describing instrumentation behavior per parameter/return value
+export enum InstrumentType {
+  None = 'None',            // Do not log or replay
+  Trace = 'Trace',          // Log value but do not allow replay override
+  TraceAndReplay = 'TraceAndReplay', // Log and allow session replay to override
+}
+
+export type ParamInstrumentationMap = Record<string, InstrumentType>;
+export type ParamsSelectorV2 = (info: { names: string[]; args: any[]; thisArg: any; label: string }) => ParamInstrumentationMap;
+
 export interface InstrumentOptions {
   logger?: Logger;
   label?: string;
   includeThis?: boolean;
   redact?: (key: string, value: unknown) => unknown;
-  params?: Array<string | number> | ParamsSelector;
-  logArgs?: boolean;
-  logReturn?: boolean;
-  // eslint-disable-next-line @typescript-eslint/ban-types
-  return?: boolean;
+  // New params: map of paramName -> InstrumentType or selector returning that map.
+  // If a name missing from map defaults to InstrumentType.None.
+  params?: ParamInstrumentationMap | ParamsSelectorV2;
+  // Return instrumentation: defaults to InstrumentType.None
+  return?: InstrumentType;
   sink?: (payload: LogUnit) => void;
-  // mockReturn removed: use session replay instead to override args/vars/return
+  // If true, and return InstrumentType.TraceAndReplay, replay override is applied to actual return value.
+  replayOverrideReturn?: boolean;
 }
 
 // Re-export all public instrumentation APIs from utils

@@ -1,4 +1,4 @@
-import { endInstrumentSession, startInstrumentSession, Eval, EvalTypes, EvalClient } from '@workspace/instrument';
+import { endInstrumentSession, startInstrumentSession, Eval, EvalTypes, EvalClient, setInstrumentSessionReplay } from '@workspace/instrument';
 import { printEvaluationTable } from '@workspace/instrument/dist/eval/evaluator';
 import { runMockServiceDecorated } from './workflow';
 import { randomUUID } from 'crypto';
@@ -37,7 +37,7 @@ async function main() {
         const datalake_url = 'http://localhost:3300';
         const provided = parseSessionIdArg();
         const sessionId = provided ? provided : `mock_session_${randomUUID()}`;
-        const units = startInstrumentSession(project, sessionId, datalake_url);
+        const units = await startInstrumentSession(project, sessionId, datalake_url, true);
         console.log('[session]', sessionId);
         const result = await runMockServiceDecorated('How to separate success and fail pipelines?');
         console.log(`[result] ${JSON.stringify(result, null, 2)}`);

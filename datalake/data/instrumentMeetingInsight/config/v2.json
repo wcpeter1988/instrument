@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "generatedAt": "2025-10-17T06:38:09.366Z",
+  "generatedAt": "2025-10-20T03:36:06.952Z",
   "metrics": [
     {
       "name": "insightHasSummary",
@@ -53,7 +53,7 @@
         "summary": "annotations.summary"
       },
       "params": {
-        "sampleValue": "summary context text",
+        "sampleValue": "mock summary content",
         "generatedFromAnnotations": true
       }
     }

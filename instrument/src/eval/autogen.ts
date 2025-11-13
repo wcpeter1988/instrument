@@ -65,7 +65,7 @@ export async function autoGenerateMetrics(units: LogUnit[], prompt?: string): Pr
       const annotationMetric: MetricConfig = {
         name: `annotation_${primaryKey}`,
         description: `Auto-generated metric derived from annotation key '${primaryKey}'.`,
-        longDescription: `This metric leverages user-provided annotations (tagId=annotations). It surfaces the '${primaryKey}' field for downstream evaluation.` + (prompt ? `\n\nPrompt context applied: ${prompt}` : ''),
+        promptTemplate: (prompt ? `${prompt}\n\n` : '') + `Prompt context : {{${primaryKey}}}`,
         methodology: 'string_match',
         query: { [primaryKey]: `annotations.${primaryKey}` },
         params: {

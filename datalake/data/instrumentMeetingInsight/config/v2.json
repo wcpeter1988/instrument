@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "generatedAt": "2025-10-20T03:36:06.952Z",
+  "generatedAt": "2025-10-29T00:15:36.484Z",
   "metrics": [
     {
       "name": "insightHasSummary",
@@ -37,23 +37,23 @@
       "methodology": "DAG",
       "promptTemplate": "Compare expected steps to actual plan steps. Expected: {{reference}} Actual: {{steps}} Return coverage",
       "query": {
-        "reference": "planGenerator.return",
-        "steps": "planGenerator.return"
+        "reference": "getMeetingInsight.return",
+        "steps": "fetchContext.return"
       },
       "params": {
         "threshold": 0.6
       }
     },
     {
-      "name": "annotation_summary",
-      "description": "Auto-generated metric derived from annotation key 'summary'.",
-      "longDescription": "This metric leverages user-provided annotations (tagId=annotations). It surfaces the 'summary' field for downstream evaluation.",
+      "name": "annotation_reference",
+      "description": "Auto-generated metric derived from annotation key 'reference'.",
+      "promptTemplate": "",
       "methodology": "string_match",
       "query": {
-        "summary": "annotations.summary"
+        "reference": "annotations.reference"
       },
       "params": {
-        "sampleValue": "mock summary content",
+        "sampleValue": "mock summary",
         "generatedFromAnnotations": true
       }
     }

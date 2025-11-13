@@ -198,3 +198,51 @@ clearInstrumentSessionReplay();
 
 Auto replay only overrides logged payload; it never mutates function execution.
 
+## Instrumentation Flow
+
+Below is a high-level view of how a wrapped call becomes a `LogUnit` and how replay feeds back into logging/evaluation.
+
+```mermaid
+%% See docs/diagrams/instrument_flow.mmd for an editable source version
+flowchart LR
+  subgraph Runtime[Application Runtime]
+    A[User Function Call] -->|wrapped by logCall / @LogMethod / @LogAll| B[Wrapper]
+    B --> C{Execute?}
+    C -->|call original fn| D[Original Function]
+    D --> E[Return Value or Throw]
+    C -->|skip during deterministic replay| E
+  end
+
+  subgraph Capture[Capture Phase]
+    E --> F[Build LogUnit\n id, label, args, this?, start/end, result]
+    F --> G[Safe Stringify + Redact]
+    G --> H[Append to Session Stream]
+  end
+
+  subgraph Storage[Storage, JSONL / Memory]
+    H --> I[items.jsonl]
+  end
+
+  subgraph Replay[Replay / Evaluation]
+    I --> J[Read LogUnits Sequentially]
+    J --> K{Mode}
+    K -->|Deterministic| L[Inject recorded result/error\n, no original execution]
+    K -->|Verify| M[Re-run original function\ncompare to recorded]
+    L --> N[Emit Events / Metrics]
+    M --> N
+  end
+
+  N --> O[Report / Diff / Metrics]
+
+  classDef accent fill:#f6f9ff,stroke:#4682b4,stroke-width:1px;
+  class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O accent;
+```
+
+Key ideas:
+1. Wrappers/decorators intercept calls and optionally short-circuit execution in deterministic replay mode.
+2. Each invocation yields a structured `LogUnit` capturing arguments, return/error, timings, and inline vars.
+3. Units stream to storage (e.g., JSONL via the datalake) enabling later retrieval.
+4. Replay reads prior units to either (a) inject results for deterministic runs or (b) verify current outputs versus history for drift detection.
+5. Evaluation hooks can compute metrics/diffs over the replay stream without modifying business logic.
+
+

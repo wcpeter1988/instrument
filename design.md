@@ -4,6 +4,21 @@
 
 > This document begins with the problem (why a new design is needed) before detailing goals and architecture.
 
+## Design Goals
+Resolve fragmentation, drift, and slow iteration through four concise goals:
+1. Unified data collection & distribution
+2. Unified evaluation pipeline
+3. Unified research → production environment
+4. Fast onboarding for non‑developer / third‑party users
+
+### Design Support (Summary)
+| Goal | How The Design Satisfies It |
+|------|-----------------------------|
+| Unified data collection & distribution | A single normalized execution record flows into a common storage structure (local or remote) for consistent cataloging, merging, and reuse without translation layers. |
+| Unified evaluation pipeline | One scoring path operates purely on standardized records plus declarative metric definitions; identical artifacts drive online and offline assessment, reducing drift. |
+| Unified research → production environment | Stable schemas and versioned configurations promote unchanged from exploratory usage to production, lowering maintenance and accelerating validation. |
+| Fast onboarding for non‑developer / 3P users | Minimal steps: capture real executions, reference existing fields in human‑readable metric descriptions, optionally auto‑derive initial definitions; no code edits required to evolve metrics. |
+
 ## ❗ Why A New / Unified Design Is Needed
 Production and evaluation historically ran as separate, loosely coupled workflows. Even when the same telemetry format could be emitted for live (online) and exported (offline) data, those artifacts still flowed through two distinct pipelines (prod usage vs. evaluation scripts) with fixed, code-embedded metrics. The unified design merges these paths by introducing a normalized execution record (LogUnit) and configuration-driven evaluation (MetricConfig), ensuring the same artifacts power both production capture and offline/online scoring without divergent loaders or hard-coded metric logic.
 
@@ -52,10 +67,13 @@ flowchart TD
 flowchart TD
     Data[Unified Data]
     Workflow[Unified Workflow]
+    LogUnitNode[LogUnits]
     
     subgraph Eval[Unified Eval]
       OnlineConfig[Online Eval Config]
       OfflineConfig[Offline Eval Config]
+      AutoGen[Autogen]
+      MetricConfigNode[MetricConfig]
       Metrics[Eval Result]
     end
 
@@ -63,10 +81,13 @@ flowchart TD
   %% main flow
   Data --> Workflow
   Workflow --> Data
-  Workflow --> OnlineConfig
-  Workflow --> OfflineConfig
-  OnlineConfig --> Metrics
-  OfflineConfig --> Metrics
+  Workflow --> LogUnitNode
+  LogUnitNode --> AutoGen
+  AutoGen --> MetricConfigNode
+  OnlineConfig --> MetricConfigNode
+  OfflineConfig --> MetricConfigNode
+  MetricConfigNode --> Metrics
+  LogUnitNode --> Metrics
 ```
 <em>Caption:</em> A single workflow produces canonical LogUnits powering both online & offline evaluation via declarative MetricConfig versions. Replay and autogen optionally leverage any captured fields (annotations are just additional tag data) and are omitted visually for simplicity.
 
@@ -94,19 +115,13 @@ flowchart TD
 </div>
 </div>
 
-## 🎯 High-Level Design Goals
-1. Unified offline/online eval pipeline
-2. Unified data collection & distribution
-3. Unified RPE (research/prototyping & experimentation) / prod environment surface
-4. Fast start for non‑dev / 3P users to run evaluation with their own data
-
 ### How The Current Design Satisfies Them
-| Goal | Design Support |
-|------|----------------|
-| 1. Unified eval pipeline | Shared LogUnit schema; metrics configs referencing tagId paths; replay reuses collected units for deterministic offline eval; same evaluator works on locally captured or remotely fetched units. |
-| 2. Unified data collection/distribution | `instrument` emits standardized LogUnits; optional sink posts to `datalake` which stores JSONL under canonical hierarchy; retrieval API provides nested or flat views for reuse in config generation & evaluation. |
-| 3. Unified RPE/prod environment | Same session API (`startInstrumentSession`, sinks) works locally or with remote endpoint; configs versioned / served from `datalake` (`project:latest`); remote fetching (`evaluateAll` shorthand) mirrors prod consumption. |
-| 4. Fast start for non-dev users | Decorators & `logCall` require minimal code changes; autogen (`autoGenerateMetrics`) bootstraps metrics from existing data fields (optionally including annotation tag units); replay enables running “as if” real calls without backend dependencies; simple curl-based ingest & browser UI list data. |
+| Goal (Renumbered) | Design Support (Aspect-Focused) |
+|-------------------|---------------------------------|
+| 1. Unified data collection & distribution | A single, normalized execution record format flows from every runtime action into a common storage hierarchy. Both local and remote persistence use the same structural shape, enabling consistent cataloging, merging, and retrieval without translation layers or divergent loaders. This eliminates fragmentation and ensures that any captured unit can be redistributed or rehydrated in identical form across environments. |
+| 2. Unified evaluation pipeline | Evaluation operates purely over the standardized records plus declarative metric definitions. The pipeline does not branch for online vs. offline: identical artifacts (records + configs) drive scoring, while deterministic reuse of previously captured records preserves behavior across time. This uniformity reduces drift and makes metric iteration independent of data acquisition mode. |
+| 3. Unified research / prototyping / production environment | The same artifacts, schema, and configuration style advance unchanged from exploratory usage to production adoption. Versioned metric definitions and stable record semantics allow promotion without refactoring. Consistency of inputs and outputs across stages lowers maintenance and accelerates validation cycles. |
+| 4. Boost start for non‑developer users | Minimal conceptual steps: capture actual executions into standardized records, reference existing fields in human-readable metric descriptions, and optionally derive initial definitions automatically from observed data fields (including human annotation records when present). This removes the need for code edits to evolve metrics, enabling rapid, iterative refinement and immediate application to freshly collected or historical datasets. |
 
 ## 🧩 Architecture Overview
 ```mermaid
@@ -157,213 +172,214 @@ flowchart TD
 ```
 <em>Caption:</em> Instrumentation is now depicted as part of the unified application/workflow (no separate workflow box). Functions/methods generate LogUnits via embedded instrumentation; LogUnits feed storage, replay re-injects into the unified app, autogen derives versioned MetricConfig, and evaluator consumes configs + units (+ replay) to produce results.
 
-## 📦 Core Concepts
-### 1. Instrument: What & Why
-`instrument` provides runtime wrappers & decorators to capture structured execution footprints (arguments, variables, return values, errors, timing) into `LogUnit`s.
+## Components
 
-Key APIs:
-- `logCall(fn, options)` – Wrap a function.
-- Decorators: `@LogMethod()`, `@LogAll()` – Instrument a single method or all methods of a class.
-- Inline capture: `logInline(label, value)`, `logVar(label, value)` / `logVars({...})`.
-- Sessions: `startInstrumentSession(project, sessionId, endpoint?)` – Attach contextual project/session + sink posting to datalake. Returns array for live access to emitted units.
-- Replay control: `setInstrumentSessionReplay(units)` / `clearInstrumentSessionReplay()` – Override live emitted args/vars/return from prior captured units.
+The system divides into two domains that form a closed loop: Data (capture, persistence, deterministic re‑use) and Evaluation (declarative judgment over captured reality). Components are described with design rationale plus high‑level interface shapes. The five core insights appear naturally throughout:
+1. Expressions inside configurations provide real‑time evaluation of referenced LogUnit fields.
+2. Collection and replay share the same Instrument API for frictionless integration.
+3. LogUnit sources are location‑agnostic: local memory, local file, or remote datalake.
+4. MetricConfig sources are likewise local (in‑repo) or remote (datalake version store).
+5. Autogen can operate online with a prompt to tailor emergent metric definitions mid‑session.
 
-Design choices:
-- Uses `AsyncLocalStorage` to thread session & call context through sync/async boundaries.
-- Extensible sink: default console vs. HTTP POST to datalake endpoint.
-- Redaction & selective param logging to protect sensitive inputs.
-- Deterministic evaluation surface: every captured call transforms into a uniform `LogUnit`.
+### 1. Data
 
-### 2. Replay: Purpose
-Replay enables deterministic re-execution of evaluation logic without invoking original implementations or external dependencies. By loading previously persisted units (auto fetched on session start if endpoint + project + session match) it can:
-- Replace live arguments/vars/returns with historical values (`payload.replayed = true`).
-- Short-circuit flaky or slow operations for faster iterative metric tuning.
-- Guarantee consistency for offline regression checks.
+#### LogUnit Schema
+Each LogUnit is a normalized envelope capturing one execution footprint: identity, timing, inputs (args), derived intermediates (vars), outcome (return / error), optional annotations, plus ordering markers for sequence reconstruction. Neutral field naming (no reliance on original call signatures) allows stable comparison across versions and teams.
 
-### 3. Configuration-Based Evaluation Framework
-Evaluation is driven by declarative `MetricConfig[]` describing:
-- `methodology`: algorithmic strategy (string match, QAG, DAG).
-- `query`: map of logical input names -> path expressions referencing LogUnit context (`<tagId>.<field>`).
-- `params`: methodology-specific knobs (thresholds, case sensitivity, etc.).
+Design properties:
+1. Uniform shape (every operation emits the same structural pattern).
+2. Additive evolution (new fields never invalidate prior records; consumers treat absence explicitly).
+3. Transport neutrality (JSON/JSONL; same schema locally or remotely).
+4. Temporal traceability (monotonic index + timestamps enable deterministic replay alignment).
 
-Benefits:
-- No hard-coded metric logic inside application code.
-- Allows versioning & remote distribution (store configs, fetch via `project:latest`).
-- Facilitates quick addition/removal/refinement without code redeploy.
+High‑level interface (illustrative):
+```ts
+interface LogUnit {
+  project: string;
+  session: string;
+  seq: number;            // ordering
+  tagId: string;          // logical label (e.g. function name or annotation bucket)
+  tsStart: number;        // epoch ms
+  tsEnd: number;
+  args?: Record<string, unknown>;
+  vars?: Record<string, unknown>; // derived intermediates
+  return?: unknown;
+  error?: { message: string; stack?: string };
+  annotations?: Record<string, unknown>; // optional human/system notes
+  replayed?: boolean;     // true if substituted during replay
+}
+```
 
-### 4. Autogen (`autoGenerateMetrics` / `autoGenerate`)
-Autogen is a bootstrapping utility that inspects collected `LogUnit`s to propose initial metrics. Annotation tag units (if present) are treated like any other tag providing fields. Today it:
-- Loads a seed metrics template (`testbed/src/eval.metrics.json`).
-- May include metrics referencing fields from a tag (e.g., `tagId === 'annotations'` yielding `annotation_summary`) just like other tags.
-- Optionally enriches descriptions with a provided prompt.
-Future expansions can infer expected outputs, coverage targets, or dynamic methodology selection based on payload patterns.
+#### Collection
+Collection transforms live workflow activity into LogUnits through a unified Instrument API. The same API can emit directly to memory, to a local file sink, or POST to a remote datalake endpoint without altering user code. Reliability (ordering, idempotence) and schema conformity are enforced at the ingestion layer; downstream consumers treat all sources identically.
 
-### 5. Annotation Tag Units (Optional)
-Annotation units (often using `tagId: 'annotations'`) are ordinary LogUnits carrying human-provided fields (e.g., `summary`). Evaluation treats them exactly like other instrumented data; configs can reference their fields via standard path queries. Autogen may propose metrics using those fields without a distinct pipeline.
-Benefits:
-- Human-provided context available as regular data.
-- Metrics can compare model output to manually supplied fields using the same configuration mechanism.
+Key considerations:
+1. Single API surface: `logCall`, decorators, or inline logging produce canonical units.
+2. Pluggable sinks: in‑memory array, file append, HTTP batching.
+3. Source abstraction: evaluators receive `LogUnit[]` without caring about origin (local vs remote).
+4. Immediate availability: captured units become evaluable as soon as appended.
 
-## 🔁 End-to-End Evaluation Pipeline
+Instrument surface (subset):
+```ts
+function startInstrumentSession(project: string, session: string, endpoint?: string): LogUnit[];
+function logCall<T extends (...a: any[]) => any>(fn: T, opts: { label: string; logArgs?: boolean; logReturn?: boolean; params?: string[] }): T;
+function logInline(tagId: string, payload: Record<string, unknown>): void; // for annotations or ad hoc units
+```
+
+#### Replay
+Replay uses previously captured LogUnits as authoritative substitutes for live executions—through the *same* Instrument API surface. When enabled, calls matching historical units (by tagId + sequence heuristics) return prior `return` payloads and restore recorded `vars` / `args` deterministically.
+
+Guarantees:
+1. Determinism across evaluation cycles (metrics see identical data).
+2. Isolation from external variability (no network, model drift).
+3. Safety: original persisted set remains immutable; replay works on copies.
+4. Seamlessness: enabling replay does not change call sites.
+
+Replay activation:
+```ts
+function setInstrumentSessionReplay(units: LogUnit[]): void; // subsequent instrumented calls may be substituted
+```
+
+### 2. Evaluation
+
+#### Configuration Schema
+Metric configuration is declarative. It references LogUnit content using *expressions*—path or computed selectors resolved at evaluation time over the current unit set (replayed or live). Expressions allow real‑time derivation without embedding custom code.
+
+Interface sketch:
+```ts
+type Expression = string; // e.g. "fetchContext.args.question" or DSL: "len(planGenerator.return) > 3"
+
+interface MetricConfig {
+  name: string;
+  methodology: string;            // e.g. 'string_match', 'QAG'
+  query: Record<string, Expression>; // named inputs resolved live
+  params?: Record<string, unknown>;  // method-specific tuning
+  version?: string;                  // remote version identifier
+  promptContext?: string;            // optional autogen prompt (online customization)
+}
+```
+
+Schema principles:
+1. Declarative clarity (intent & inputs listed, not coded).
+2. Versionable (remote datalake may assign immutable version IDs).
+3. Composable (higher-level sets aggregate multiple metrics).
+4. Expression-driven (dynamic evaluation over local or remote sourced units).
+
+#### Configuration‑Based Evaluation
+Evaluation resolves expressions against the current `LogUnit[]` (live or replayed) and applies methodology logic. The engine is content‑centric: it neither cares where units or configs originated nor whether execution is offline (static set) or online (streaming). Config retrieval may be local (`MetricConfig[]`) or a remote reference (`"project:latest"`).
+
+Evaluator surface:
+```ts
+type MetricSource = MetricConfig[] | string; // string = remote version selector
+
+interface EvaluationResult {
+  metric: string;
+  passed: boolean;
+  score?: number;
+  details?: Record<string, unknown>;
+  version?: string;
+}
+
+async function evaluateAll(source: MetricSource, units: LogUnit[]): Promise<EvaluationResult[]>;
+```
+
+Properties:
+1. Uniform flow (same code path for offline vs online vs replay scenarios).
+2. Drift resistance (config versions unify historical & current scoring).
+3. Auditability (results link metric name + version + resolved expressions).
+4. Extensibility (new methodologies register without breaking existing configs).
+
+#### Configuration Auto Generation
+Autogen inspects available fields (including annotation units) and optionally uses a *prompt* to steer metric proposal (online customization). Generated metrics appear as draft `MetricConfig[]` with expression queries already mapped to discovered LogUnit paths, ready for refinement or persistence.
+
+Interface sketch:
+```ts
+async function autoGenerateMetrics(units: LogUnit[], prompt?: string): Promise<MetricConfig[]>;
+```
+
+Advantages:
+1. Rapid coverage (surfaces evaluable relationships early).
+2. Democratization (non‑developers iterate via config edits instead of code changes).
+3. Online adaptability (prompt-driven generation during live sessions).
+4. Historical exploration (replay + autogen to discover latent evaluable signals).
+
+## Flows
+
+This section visualizes primary operational flows. Diagrams emphasize unified surfaces, local/remote symmetry, replay reuse, and online autogen.
+
+### A. Data Collection Flow
 ```mermaid
 sequenceDiagram
-  participant Dev as Developer/User
-  participant Code as App Code
-  participant Inst as Instrument
-  participant DL as Datalake
-  participant Auto as Autogen
+  participant Dev as Workflow
+  participant Inst as Instrument API
+  participant UnitsStore as LogUnits Storage
+
+  Dev->>Inst: startInstrumentSession(project, session, endpoint?)
+  Dev->>Inst: instrumented call (instrumentMethod/decorator)
+  Inst->>UnitsStore: store(LogUnit)
+  Dev->>Inst: next instrumented call
+  Inst->>UnitsStore: store(LogUnit)
+```
+<em>Insight: Pure capture path: Instrument API records executions into LogUnits Storage (memory/file/remote) without replay concerns.</em>
+
+### B. Offline Evaluation Flow
+```mermaid
+sequenceDiagram
+  participant Dev as Workflow
+  participant Replay as Instrument API
+  participant UnitsStore as LogUnits Storage
+  participant ConfigStore as Configuration Storage
   participant Eval as Evaluator
 
-  Dev->>Code: Add decorators / logCall wrappers
-  Dev->>Inst: startInstrumentSession(project, sessionId, endpoint)
-  Code->>Inst: Function/method executions
-  Inst->>DL: POST LogUnits (/api/data)
-  DL-->>Inst: (optional) Prior units for replay
-  Dev->>Inst: setInstrumentSessionReplay(units) (implicit auto load)
-  Dev->>Auto: autoGenerateMetrics(units)
-  Auto-->>Dev: MetricConfig[]
-  Dev->>Eval: evaluateAll(metrics, units)
+  Dev->>Replay: startInstrumentSession(project, session, endpoint, replay=True)
+  opt Activate Replay
+    Replay->>UnitsStore: loadOrFetchUnits(project?, session?)
+    UnitsStore-->>Dev: LogUnit[]
+    Dev->>Replay: setInstrumentSessionReplay(units)
+  end
+  Dev->>ConfigStore: loadOrFetchConfigs(selector | version)
+  ConfigStore-->>Dev: MetricConfig[]
+  Dev->>Eval: evaluateAll(configs, units)
   Eval-->>Dev: EvaluationResult[]
-  Dev->>DL: (optional) Persist config version (/api/config upload)
-  Dev->>Eval: evaluateAll("project:latest", units) (remote config)
 ```
+<em>Insight: Single abstractions for units and configs hide local vs remote provenance.</em>
 
-## 🛠 Usage Instructions / Demos
-### A. How Instrument Works
-```ts
-import { logCall, startInstrumentSession } from '@workspace/instrument';
+### C. Online Evaluation Flow (Streaming + Prompt Autogen Option)
+```mermaid
+sequenceDiagram
+  participant Dev as Workflow
+  participant Inst as Instrument API
+  participant UnitsStore as LogUnits Storage
+  participant ConfigStore as Configuration Storage
+  participant Eval as Evaluator
 
-function add(a: number, b: number) { return a + b; }
-const loggedAdd = logCall(add, { label: 'add', logArgs: true, logReturn: true });
-
-const units = startInstrumentSession('demo', 's1', 'http://localhost:3300');
-loggedAdd(2, 3);
-console.log(units.length); // 1
+  Dev->>Inst: startInstrumentSession(project, session, endpoint)
+  Inst-->>UnitsStore: storeUnits(LogUnit)
+  Dev->>ConfigStore: loadOrFetchConfigs(selector | version)
+  ConfigStore-->>Dev: MetricConfig[]
+  Dev->>Eval: evaluateAll(configs, currentUnits)
+  Eval-->>Dev: EvaluationResult[]
 ```
-Decorator variant:
-```ts
-import { LogMethod, startInstrumentSession } from '@workspace/instrument';
-class Calculator {
-  @LogMethod({ logArgs: true, logReturn: true })
-  multiply(x: number, y: number) { return x * y; }
-}
-startInstrumentSession('demo', 's2');
-new Calculator().multiply(4, 5);
+<em>Insight: Autogen can run mid‑session with a customization prompt producing immediate evaluable configs.</em>
+
+### D. Annotation & Configuration Update Flow
+```mermaid
+sequenceDiagram
+  participant Dev as Annotation
+  participant UnitsStore as LogUnits Storage
+  participant Auto as Autogen
+  participant ConfigStore as Configuration Storage
+
+  UnitsStore->>Auto: autoGenerateMetrics(UnitsStore), wo Annotation
+  Auto->>ConfigStore: Draft MetricConfig[]
+  Dev-->>UnitsStore: add annotations
+  UnitsStore-->>Auto: autoGenerateMetrics(UnitsStore)
+  Auto-->>ConfigStore: Draft MetricConfig[]
 ```
-Selective parameter logging (use replay for return overrides):
-```ts
-const fetchUser = async (id: string, authToken: string) => ({ id, name: 'Jane' });
-const wrapped = logCall(fetchUser, {
-  label: 'fetchUser',
-  params: ['id'],        // only log id, hides authToken
-  logArgs: true,
-  logReturn: true,
-});
-// To override the return deterministically, capture a prior session and call:
-// setInstrumentSessionReplay(previousUnitsWithFetchUserCalls)
-```
+<em>Insight: Annotations reside inside LogUnits; config versions update and evaluation re-runs immediately using enriched unit content.</em>
 
-### B. How Autogen Config Works
-```ts
-import { autoGenerateMetrics } from '@workspace/instrument';
-// After session concluded or mid-flight access live units
-const metrics = await autoGenerateMetrics(units, 'Initial bootstrapping prompt');
-// metrics: MetricConfig[] (seed + possible metrics derived from any captured fields, including optional annotation tag units)
-```
-Each metric’s `query` maps logical names to tag paths:
-```json
-{
-  "name": "insightHasSummary",
-  "methodology": "string_match",
-  "query": {
-    "target": "getMeetingInsight.return",
-    "expected": "getMeetingInsight.vars.prompt.value"
-  },
-  "params": { "caseSensitive": false }
-}
-```
-
-### C. How Replay Works
-Automatic replay when starting session with endpoint and matching prior data:
-```ts
-startInstrumentSession('demo', 'previousSession', 'http://localhost:3300');
-// instrument will auto-load historical units and override live call outcomes.
-```
-Manual replay:
-```ts
-import { setInstrumentSessionReplay } from '@workspace/instrument';
-setInstrumentSessionReplay(previousUnitsSubset); // tagId keyed; args/vars/return override
-```
-Replay replaces prior mockReturn capability:
-- To override outputs, capture a previous session's units and apply `setInstrumentSessionReplay(units)`; args/vars/return fields are substituted and flagged with `replayed: true`.
-
-### D. With Optional Annotation Tag Units
-If no annotation tag exists: Autogen uses the base template only.
-If an annotation tag exists (`tagId === 'annotations'` or similar): Its fields are simply additional sources for potential metrics (e.g., `annotation_summary`). Add such data by logging a unit:
-```ts
-logInline('annotations', { summary: 'User intent classification looks correct.' });
-```
-
-### E. Offline vs Online Data Evaluation
-We distinguish evaluation contexts by data freshness and acquisition path, not by code changes. Instrumentation always emits `LogUnit`s; evaluation always consumes `LogUnit[]` + `MetricConfig[]`.
-
-| Mode | Data Source | Freshness | Examples | Typical Tools | Notes |
-|------|-------------|-----------|----------|---------------|-------|
-| Offline (historical) | Previously captured units from datalake (`GET /api/data`) | Stale / point-in-time | Re-running yesterday's session; regression suite | `startInstrumentSession` + manual load; replay; `evaluateAll` | May use replay to avoid external calls; units can be loaded via a local file loader instead of service. |
-| Offline (local file) | JSONL / JSON exported or side-loaded | Static | Team-shared dataset on disk | Custom dataloader -> `LogUnit[]` | Datalake optional; shape must match `LogUnit`. |
-| Offline (annotation-enhanced) | Historical units + annotation tag units | Static + curated | Human labeled summaries / correctness tags | Autogen + `annotation_*` metrics | Adds derived metrics from annotation payload fields. |
-| Online (real-time) | Live instrumentation posting to datalake | Fresh / streaming | Current session executing now | `startInstrumentSession(project, session, endpoint)` | Evaluation can run mid-flight on partial unit set. |
-| Online (real-time + annotation) | Live units + operator/manual annotation capture | Fresh + evolving | Real-time QA / triage | Inline `logInline('annotations', {...})` | Enables immediate feedback loop for adaptive metrics. |
-
-Offline evaluation means the units are already materialized (could still be pulled from datalake, just not live). Online evaluation means units are arriving and being appended as code executes.
-
-Flows:
-1. Offline (historical from datalake):
-  - Query datalake for `project`/`session` -> assemble `units[]`.
-  - Optionally `setInstrumentSessionReplay(units)` to simulate calls deterministically.
-  - Load metrics (`local file` or `project:latest`).
-  - `evaluateAll(metrics, units)`.
-2. Offline (local file loader):
-  - Parse JSONL file(s) into `LogUnit[]`.
-  - Run autogen if desired; evaluate.
-3. Offline with annotations:
-  - Ensure annotation tag units exist (e.g., `annotations`).
-  - `autoGenerateMetrics(units)` adds annotation-derived metrics.
-  - Evaluate; compare annotated vs generated output signals.
-4. Online real-time:
-  - Start session with endpoint.
-  - Periodically snapshot current in-memory `units` array (it grows).
-  - Evaluate incrementally (streaming scoring) or at end.
-5. Online with live annotations:
-  - Same as online; at any point log annotation unit.
-  - Re-run autogen to incorporate new fields; continue evaluation.
-
-Hybrid pattern: Fetch remote config (`project:latest`) but evaluate exclusively on replayed historical units—useful for ensuring new metric versions retain backward compatibility before deploying live instrumentation changes.
-
-Design invariant: evaluation code never inspects "where" the units came from—just their content. This supports decoupling and portability.
-
-### Fetch Remote Config Example
-```ts
-import { evaluateAll } from '@workspace/instrument';
-const results = await evaluateAll('demo:latest', units); // remote metrics fetch
-```
-Or using client:
-```ts
-import { EvalClient } from '@workspace/instrument';
-const client = new EvalClient('http://localhost:3300');
-const results = await client.evaluate('demo:latest', units);
-```
-
-### Metrics Evaluation Result Handling
-```ts
-import { evaluateAll, printEvaluationTable } from '@workspace/instrument';
-const results = await evaluateAll(metrics, units);
-printEvaluationTable(results); // Console PASS/FAIL table
-```
-
-## 🔐 Redaction & Privacy (To be extended)
-- Provide `redact(key, value)` in InstrumentOptions to transform sensitive data during serialization.
-- Selective param logging prevents accidental exposure of secrets (e.g., only log `id`, skip `authToken`).
+---
+These flows reinforce invariants: single Instrument API, expression‑based config referencing, replay determinism, symmetric local/remote sourcing, and online autogen adaptability.
 
 ## 🧪 Methodologies Overview (To be extended)
 | Methodology | Purpose | Example Use |
@@ -371,18 +387,6 @@ printEvaluationTable(results); // Console PASS/FAIL table
 | `string_match` | Token/substring expectation validation | Check prefix or keyword presence in generated summary |
 | `QAG` | Question–Answer relevance scoring (LLM / heuristic) | Ensure answer covers asked factual question |
 | `DAG` | Step coverage / structural comparison | Verify generated plan includes required steps |
-
-## ⚙ Path Query Semantics (To be extended)
-Metric `query` paths use `<tagId>.<field>` addressing into a tag-context object built from `LogUnit`s. Fields originate from `payload` keys (`args`, `vars`, `return`).
-Examples:
-- `fetchContext.args.question` → argument `question` of `fetchContext`.
-- `getMeetingInsight.vars.prompt.value` → captured variable `prompt` value.
-- `planGenerator.return` → returned value of `planGenerator`.
-
-## 📈 Extensibility Points
-- Eval methodologies: implement `evaluate(ctx)` returning `EvaluationResult` and register under `REGISTRY`, extend without affect existing config.
-- Data Manipulation: enhancements replay, partial arg overrides, return overrides.
-- Data Management: integrate UI for manual annotation.
 
 ## ❓ FAQ
 **Q: What does "decoupling instrument vs datalake" mean?**  
